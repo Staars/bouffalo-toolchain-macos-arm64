@@ -68,7 +68,8 @@ To include GDB, set `ENABLE_GDB: 'true'` in `.github/workflows/build.yml` (defau
 ## Troubleshooting
 
 - `newlib` failure is the usual suspect on macOS. See the commented Pine64 patch line in `build.yml`.
-- Upstream clone is ~6.65 GB — the runner needs time and disk; don't add `--depth 1` unless you know submodules tolerate it.
+- The workflow intentionally inits only the `binutils`/`gcc`/`newlib` submodules (`+gdb` when enabled). A full `--recursive` checkout is broken at `V3.0.1` (stale `dejagnu` ref upstream) and pulls unneeded `llvm`/`qemu`/`glibc` (~6.65 GB full clone).
+- `M linux-headers/...netfilter/...` case-collision warnings on macOS runners are harmless for newlib builds (case-insensitive APFS; those headers are linux-only).
 - If `macos-14` is retired, try `macos-15` (also arm64).
 
 ## Licensing

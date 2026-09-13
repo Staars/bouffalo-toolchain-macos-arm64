@@ -51,18 +51,37 @@ jobs:
           cd xuantie-gnu-toolchain
           git fetch --tags origin
           git checkout "$XUANTIE_REF"
-          git submodule update --init --recursive
+          # NOTE: do NOT use `git submodule update --init --recursive` here.
+          # At V3.0.1 the pinned dejagnu commit is no longer fetchable from
+          # riscv-collab/riscv-dejagnu ("not our ref"), and qemu/llvm/spike/pk/
+          # musl/glibc/dejagnu are not needed for a bare-metal (newlib) build
+          # anyway (upstream configure fetches required modules on demand).
+          git submodule update --init binutils gcc newlib
+          if [ "$ENABLE_GDB" = "true" ]; then
+            git submodule update --init gdb
+          fi
           git rev-parse HEAD
-          git status --short --branch
+          git submodule status || true
+          git status --short --branch || true
+          # NOTE: `M linux-headers/...netfilter/...` case-collision warnings on
+          # macOS are harmless for newlib builds. The default APFS volume is
+          # case-insensitive and those headers (only used for linux/glibc
+          # builds) collide by case. Ignore them.
 
       - name: Patch for macOS ARM64
         working-directory: xuantie-gnu-toolchain
         run: |
           # Remove Darwin-specific object files that break on arm64.
           # Upstream config.host assumes old x86_64-darwin host fragments.
-          perl -pi -e 's/.*=host-darwin\.o$//' riscv-gcc/gcc/config.host || true
-          perl -pi -e 's/.* x-darwin\.$//' riscv-gcc/gcc/config.host || true
-          git diff -- riscv-gcc/gcc/config.host || true
+          # NOTE: since V3.0.1 the gcc submodule lives at `gcc/`, not `riscv-gcc/`
+          # (confirmed by submodule map: `Submodule 'gcc' ... path 'gcc'`).
+          if [ -f gcc/gcc/config.host ]; then
+            perl -pi -e 's/.*=host-darwin\.o$//' gcc/gcc/config.host || true
+            perl -pi -e 's/.* x-darwin\.$//' gcc/gcc/config.host || true
+            git diff -- gcc/gcc/config.host || true
+          else
+            echo "gcc/gcc/config.host not found, skipping darwin patch"
+          fi
 
           # If newlib fails, uncomment and apply the community patch:
           # curl -L https://raw.githubusercontent.com/pine64-org/pine_ox64/master/patches/riscv-newlib.patch | patch -p1
