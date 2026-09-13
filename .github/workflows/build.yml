@@ -96,17 +96,24 @@ jobs:
             echo "gcc/gcc/config.host not found, skipping darwin patch"
           fi
 
-          # Work around ancient bundled zlib (binutils/zlib/zutil.h) defining
+          # Work around ancient bundled zlib (zutil.h) defining
           # `fdopen(fd,mode) NULL`, which poisons macOS SDK headers (<stdio.h>
           # declares fdopen, so the macro corrupts its declaration and the build
           # dies in libz_a-zutil.o). macOS has a real fdopen(), so skip the define
           # on Apple and use it.
-          python3 - <<'PYEOF'
+          # NOTE: binutils and gdb are separate checkouts of binutils-gdb, each
+          # with its own bundled zlib copy — both must be patched.
+          for ZUTIL in binutils/zlib/zutil.h gdb/zlib/zutil.h; do
+            if [ ! -f "$ZUTIL" ]; then
+              echo "$ZUTIL not present, skipping"
+              continue
+            fi
+            python3 - "$ZUTIL" <<'PYEOF'
           import pathlib, re, sys
-          p = pathlib.Path("binutils/zlib/zutil.h")
+          p = pathlib.Path(sys.argv[1])
           lines = p.read_text().splitlines(keepends=True)
           if any("elif !defined(__APPLE__)" in l for l in lines):
-              print("zutil.h already patched for Apple fdopen, skipping")
+              print(f"{p} already patched for Apple fdopen, skipping")
           else:
               patched = 0
               for i, l in enumerate(lines):
@@ -123,11 +130,12 @@ jobs:
                               patched += 1
                           break
               if patched != 1:
-                  sys.exit(f"FATAL: expected to patch 1 fdopen site, patched {patched}")
+                  sys.exit(f"FATAL: expected to patch 1 fdopen site in {p}, patched {patched}")
               p.write_text("".join(lines))
-              print("patched binutils/zlib/zutil.h for Apple fdopen")
+              print(f"patched {p} for Apple fdopen")
           PYEOF
-          git -C binutils diff -- zlib/zutil.h || true
+            git -C "${ZUTIL%%/*}" diff -- "${ZUTIL#*/}" || true
+          done
 
           # If newlib fails, uncomment and apply the community patch:
           # curl -L https://raw.githubusercontent.com/pine64-org/pine_ox64/master/patches/riscv-newlib.patch | patch -p1
