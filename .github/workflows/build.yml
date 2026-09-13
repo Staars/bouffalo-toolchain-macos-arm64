@@ -139,7 +139,13 @@ jobs:
           if [ "$ENABLE_GDB" != "true" ]; then
             GDB_FLAG="--disable-gdb"
           fi
-          ./configure --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" --with-cmodel=medany --enable-multilib $GDB_FLAG
+          # NOTE: Homebrew installs GMP/MPFR/MPC/expat under $(brew --prefix),
+          # which Apple Clang does not search by default, so the gcc/gdb
+          # configures cannot find them ("Building GDB requires GMP 4.2+").
+          # --with-gcc-dep-libs forwards that prefix to every sub-configure;
+          # it is the mechanism upstream designed for exactly this case.
+          ./configure --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" --with-cmodel=medany --enable-multilib $GDB_FLAG \
+            --with-gcc-dep-libs="$(brew --prefix)"
 
       - name: Build
         working-directory: xuantie-gnu-toolchain
