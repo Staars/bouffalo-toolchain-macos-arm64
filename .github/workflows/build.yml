@@ -96,6 +96,39 @@ jobs:
             echo "gcc/gcc/config.host not found, skipping darwin patch"
           fi
 
+          # Work around ancient bundled zlib (binutils/zlib/zutil.h) defining
+          # `fdopen(fd,mode) NULL`, which poisons macOS SDK headers (<stdio.h>
+          # declares fdopen, so the macro corrupts its declaration and the build
+          # dies in libz_a-zutil.o). macOS has a real fdopen(), so skip the define
+          # on Apple and use it.
+          python3 - <<'PYEOF'
+          import pathlib, re, sys
+          p = pathlib.Path("binutils/zlib/zutil.h")
+          lines = p.read_text().splitlines(keepends=True)
+          if any("elif !defined(__APPLE__)" in l for l in lines):
+              print("zutil.h already patched for Apple fdopen, skipping")
+          else:
+              patched = 0
+              for i, l in enumerate(lines):
+                  if "define fdopen(fd,mode) NULL" not in l:
+                      continue
+                  # walk upward to the #else of the __MWERKS__ branch (the one
+                  # whose previous line pulls in <unix.h>); other fdopen sites
+                  # (BEOS/RISCOS, MSVC) have no such context and are left alone
+                  for j in range(i - 1, max(i - 8, 0), -1):
+                      if re.match(r"\s*#\s*else\s*$", lines[j]):
+                          if "unix.h" in lines[j - 1]:
+                              indent = lines[j].split("else")[0]
+                              lines[j] = f"{indent}elif !defined(__APPLE__)\n"
+                              patched += 1
+                          break
+              if patched != 1:
+                  sys.exit(f"FATAL: expected to patch 1 fdopen site, patched {patched}")
+              p.write_text("".join(lines))
+              print("patched binutils/zlib/zutil.h for Apple fdopen")
+          PYEOF
+          git -C binutils diff -- zlib/zutil.h || true
+
           # If newlib fails, uncomment and apply the community patch:
           # curl -L https://raw.githubusercontent.com/pine64-org/pine_ox64/master/patches/riscv-newlib.patch | patch -p1
 

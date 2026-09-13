@@ -71,6 +71,7 @@ GDB is built by default (upstream default). To skip it for a faster build, set `
 ## Troubleshooting
 
 - `newlib` failure is the usual suspect on macOS. See the commented Pine64 patch line in `build.yml`.
+- The workflow patches binutils' bundled zlib (`fdopen` define poisons modern macOS SDK headers) — see the `Patch for macOS ARM64` step.
 - The workflow intentionally inits only the `binutils`/`gcc`/`newlib` submodules (`+gdb` when enabled). A full `--recursive` checkout is broken at `V3.0.1` (stale `dejagnu` ref upstream) and pulls unneeded `llvm`/`qemu`/`glibc` (~6.65 GB full clone).
 - `M linux-headers/...netfilter/...` case-collision warnings on macOS runners are harmless for newlib builds (case-insensitive APFS; those headers are linux-only).
 - `macos-14` is intentionally not used: GitHub deprecated the Sonoma images (fully unsupported after 2026-11-02).
