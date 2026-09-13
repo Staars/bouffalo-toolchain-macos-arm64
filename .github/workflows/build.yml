@@ -17,14 +17,21 @@ env:
   XUANTIE_REF: V3.0.1 # tag; full commit is c66309b74edd581125a8165f07296c85d3fa71c9
   XUANTIE_BRANCH: xuantie-gnu-toolchain
   INSTALL_DIR: xuantie-gnu-toolchain/install
-  TARBALL: xuantie-gnu-toolchain-macos-arm64.tar.gz
   # Set to 'true' to add --enable-gdb (longer build). Default 'false' for faster Bouffalo SDK builds.
   ENABLE_GDB: 'false'
 
 jobs:
   build:
-    runs-on: macos-14 # Apple Silicon (M1) runner -> native arm64 binaries
+    # macos-14 is deprecated (fully unsupported after 2026-11-02), so build on
+    # the supported arm64 images instead. Both jobs produce native arm64 binaries.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 360
+    env:
+      TARBALL: xuantie-gnu-toolchain-${{ matrix.os }}-arm64.tar.gz
 
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +40,7 @@ jobs:
         run: |
           uname -a
           arch
+          sw_vers
           sysctl -n hw.ncpu || true
 
       - name: Install Homebrew dependencies
@@ -117,16 +125,16 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: xuantie-gnu-toolchain-macos-arm64
+          name: xuantie-gnu-toolchain-${{ matrix.os }}-arm64
           path: |
-            xuantie-gnu-toolchain-macos-arm64.tar.gz
-            xuantie-gnu-toolchain-macos-arm64.tar.gz.sha256
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            xuantie-gnu-toolchain-macos-arm64.tar.gz
-            xuantie-gnu-toolchain-macos-arm64.tar.gz.sha256
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
           generate_release_notes: true

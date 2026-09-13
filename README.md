@@ -10,19 +10,22 @@ Why native? Rosetta 2 is on a deprecation path (expected to remain through macOS
 
 ## Download
 
-Go to [Releases](../../releases) and download `xuantie-gnu-toolchain-macos-arm64.tar.gz` (plus `.sha256`).
+Go to [Releases](../../releases) and download the tarball matching your preference (plus `.sha256`):
 
-Verify:
+- `xuantie-gnu-toolchain-macos-26-arm64.tar.gz` (recommended — built on macOS 26 Tahoe)
+- `xuantie-gnu-toolchain-macos-15-arm64.tar.gz` (built on macOS 15 Sequoia)
+
+Both are native Apple Silicon binaries; either works on arm64 Macs. Verify and install, e.g.:
 
 ```bash
-shasum -a 256 -c xuantie-gnu-toolchain-macos-arm64.tar.gz.sha256
+shasum -a 256 -c xuantie-gnu-toolchain-macos-26-arm64.tar.gz.sha256
 ```
 
 ## Install
 
 ```bash
 sudo mkdir -p /opt/riscv-toolchain/xuantie
-sudo tar -xzf xuantie-gnu-toolchain-macos-arm64.tar.gz -C /opt/riscv-toolchain/xuantie --strip-components=1
+sudo tar -xzf xuantie-gnu-toolchain-macos-26-arm64.tar.gz -C /opt/riscv-toolchain/xuantie --strip-components=1
 export PATH=/opt/riscv-toolchain/xuantie/bin:$PATH
 riscv64-unknown-elf-gcc --version
 file $(which riscv64-unknown-elf-gcc)  # should say arm64
@@ -52,7 +55,7 @@ set(BL_FW_POST_PROC ${BL_SDK_BASE}/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_po
 
 ## Build your own release
 
-This repo builds on a native `macos-14` (M1) GitHub Actions runner:
+This repo builds a matrix of native arm64 runners (`macos-15` + `macos-26`):
 
 ```bash
 git tag v1.0.0
@@ -70,7 +73,7 @@ To include GDB, set `ENABLE_GDB: 'true'` in `.github/workflows/build.yml` (defau
 - `newlib` failure is the usual suspect on macOS. See the commented Pine64 patch line in `build.yml`.
 - The workflow intentionally inits only the `binutils`/`gcc`/`newlib` submodules (`+gdb` when enabled). A full `--recursive` checkout is broken at `V3.0.1` (stale `dejagnu` ref upstream) and pulls unneeded `llvm`/`qemu`/`glibc` (~6.65 GB full clone).
 - `M linux-headers/...netfilter/...` case-collision warnings on macOS runners are harmless for newlib builds (case-insensitive APFS; those headers are linux-only).
-- If `macos-14` is retired, try `macos-15` (also arm64).
+- `macos-14` is intentionally not used: GitHub deprecated the Sonoma images (fully unsupported after 2026-11-02).
 
 ## Licensing
 
