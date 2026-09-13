@@ -1,0 +1,108 @@
+name: Build macOS ARM64 Xuantie Toolchain
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Latest stable upstream at time of scaffolding (2026-09-13).
+# V3.0.1 is the newest non-nightly release on XUANTIE-RV/xuantie-gnu-toolchain.
+# T-head-Semi/xuantie-gnu-toolchain redirects to XUANTIE-RV; use canonical URL.
+env:
+  XUANTIE_REPO: https://github.com/XUANTIE-RV/xuantie-gnu-toolchain.git
+  XUANTIE_REF: V3.0.1 # tag; full commit is c66309b74edd581125a8165f07296c85d3fa71c9
+  XUANTIE_BRANCH: xuantie-gnu-toolchain
+  INSTALL_DIR: xuantie-gnu-toolchain/install
+  TARBALL: xuantie-gnu-toolchain-macos-arm64.tar.gz
+
+jobs:
+  build:
+    runs-on: macos-14 # Apple Silicon (M1) runner -> native arm64 binaries
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner arch
+        run: |
+          uname -a
+          arch
+          sysctl -n hw.ncpu || true
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew update
+          brew install python3 gawk gnu-sed gmp mpfr libmpc isl zlib expat coreutils texinfo wget autoconf automake libtool pkg-config
+
+      - name: Add GNU tools to PATH
+        run: |
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/opt/gnu-sed/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Clone Xuantie GNU Toolchain (pinned)
+        run: |
+          git clone --branch "$XUANTIE_BRANCH" "$XUANTIE_REPO" xuantie-gnu-toolchain
+          cd xuantie-gnu-toolchain
+          git fetch --tags origin
+          git checkout "$XUANTIE_REF"
+          git submodule update --init --recursive
+          git rev-parse HEAD
+          git status --short --branch
+
+      - name: Patch for macOS ARM64
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          # Remove Darwin-specific object files that break on arm64.
+          # Upstream config.host assumes old x86_64-darwin host fragments.
+          perl -pi -e 's/.*=host-darwin\.o$//' riscv-gcc/gcc/config.host || true
+          perl -pi -e 's/.* x-darwin\.$//' riscv-gcc/gcc/config.host || true
+          git diff -- riscv-gcc/gcc/config.host || true
+
+          # If newlib fails, uncomment and apply the community patch:
+          # curl -L https://raw.githubusercontent.com/pine64-org/pine_ox64/master/patches/riscv-newlib.patch | patch -p1
+
+      - name: Configure
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          ./configure --prefix="$PWD/install" --with-cmodel=medany --enable-multilib
+
+      - name: Build
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Verify native arm64 binaries
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          ./install/bin/riscv64-unknown-elf-gcc --version
+          file ./install/bin/riscv64-unknown-elf-gcc
+          # Must print "arm64", not "x86_64"
+          file ./install/bin/riscv64-unknown-elf-gcc | grep -q "arm64"
+          otool -L ./install/bin/riscv64-unknown-elf-gcc || true
+
+      - name: Package
+        run: |
+          tar -czf "$TARBALL" -C xuantie-gnu-toolchain/install .
+          shasum -a 256 "$TARBALL" | tee "$TARBALL.sha256"
+          ls -lh "$TARBALL" "$TARBALL.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xuantie-gnu-toolchain-macos-arm64
+          path: |
+            xuantie-gnu-toolchain-macos-arm64.tar.gz
+            xuantie-gnu-toolchain-macos-arm64.tar.gz.sha256
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            xuantie-gnu-toolchain-macos-arm64.tar.gz
+            xuantie-gnu-toolchain-macos-arm64.tar.gz.sha256
+          generate_release_notes: true

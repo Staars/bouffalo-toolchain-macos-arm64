@@ -1,0 +1,5 @@
+*.tar.gz
+*.sha256
+xuantie-gnu-toolchain/
+install/
+.DS_Store

@@ -1,0 +1,18 @@
+Xuantie GNU Toolchain licensing note
+====================================
+
+Upstream: https://github.com/XUANTIE-RV/xuantie-gnu-toolchain
+Pinned ref used by .github/workflows/build.yml: V3.0.1
+  (commit c66309b74edd581125a8165f07296c85d3fa71c9, branch xuantie-gnu-toolchain)
+
+The Xuantie GNU Toolchain (GCC, Binutils, newlib/glibc, GDB) is
+GPL-licensed (see upstream LICENSE / COPYING files).
+
+When you distribute binaries built by the workflow in this repo
+(e.g. via GitHub Releases as xuantie-gnu-toolchain-macos-arm64.tar.gz),
+you must comply with the GPL: provide or offer the corresponding
+source, e.g. by linking the release notes / README to the exact
+upstream commit above plus any patches applied in build.yml.
+
+This file is not legal advice. Check upstream LICENSE before
+redistributing.
