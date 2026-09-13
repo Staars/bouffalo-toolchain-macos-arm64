@@ -137,6 +137,55 @@ jobs:
             git -C "${ZUTIL%%/*}" diff -- "${ZUTIL#*/}" || true
           done
 
+          # Work around newer Clang rejecting GDB's enum signedness detection:
+          # gdbsupport/enum-flags.h computes static_cast<bool>(T (-1) < T (0)),
+          # but converting -1 to an enum outside its range is a hard error on
+          # recent Clang ("non-type template argument is not a constant
+          # expression") with no warning flag to disable, breaking every TU
+          # including defs.h.  Detect the signedness of the true underlying
+          # type instead, which agrees everywhere the old expression compiled
+          # (and matches current upstream GDB's resolution).
+          if [ -f gdb/gdbsupport/enum-flags.h ]; then
+            python3 - gdb/gdbsupport/enum-flags.h <<'PYEOF'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          if "std::is_signed<typename std::underlying_type<T>::type>::value" in src:
+              print(f"{p} already patched for enum signedness, skipping")
+          else:
+              lines = src.splitlines(keepends=True)
+              s = next((i for i, l in enumerate(lines)
+                        if "struct enum_underlying_type" in l), None)
+              if s is None or s == 0 or "template<typename T>" not in lines[s - 1]:
+                  sys.exit(f"FATAL: enum_underlying_type head not found in {p}")
+              start = s - 1
+              end = next((i for i in range(s, len(lines))
+                          if lines[i].rstrip() == "};"), None)
+              if end is None:
+                  sys.exit(f"FATAL: end of enum_underlying_type not found in {p}")
+              if "T (-1)" not in "".join(lines[start:end]):
+                  sys.exit(f"FATAL: enum_underlying_type body changed upstream in {p}")
+              new_block = """template<typename T>
+          struct enum_underlying_type
+          {
+            /* NOTE(apple-clang): signedness used to be detected with
+               static_cast<bool>(T (-1) < T (0)), but newer Clang rejects
+               converting -1 to an enum outside its range as a hard error, with
+               no warning flag to disable it.  The signedness of the true
+               underlying type agrees everywhere the old expression compiled.  */
+            typedef typename
+              integer_for_size<sizeof (T),
+                               std::is_signed<typename std::underlying_type<T>::type>::value>::type
+              type;
+          };
+          """
+              lines[start:end + 1] = [new_block]
+              p.write_text("".join(lines))
+              print(f"patched {p} for enum signedness detection")
+          PYEOF
+            git -C gdb diff -- gdbsupport/enum-flags.h || true
+          fi
+
           # If newlib fails, uncomment and apply the community patch:
           # curl -L https://raw.githubusercontent.com/pine64-org/pine_ox64/master/patches/riscv-newlib.patch | patch -p1
 
