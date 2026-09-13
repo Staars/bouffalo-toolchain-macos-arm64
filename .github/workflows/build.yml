@@ -34,7 +34,7 @@ jobs:
       TARBALL: xuantie-gnu-toolchain-${{ matrix.os }}-arm64.tar.gz
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5 # node24 runtime (v4 is node20, deprecated)
 
       - name: Show runner arch
         run: |
@@ -123,7 +123,9 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/$TARBALL" "$GITHUB_WORKSPACE/$TARBALL.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        # Pinned main @ 043fb46 (2026-04-10, node24). No v6 release yet (v5 is still
+        # node20, deprecated) — switch back to a version tag once v6 exists.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: xuantie-gnu-toolchain-${{ matrix.os }}-arm64
           path: |
@@ -131,10 +133,15 @@ jobs:
             ${{ env.TARBALL }}.sha256
 
       - name: Create Release
+        # NOTE: softprops/action-gh-release@v2 is still node20 (deprecated), so the
+        # release is published with the preinstalled `gh` CLI instead (no node at all).
+        # Matrix race-safe: exactly one job creates the release, both attach assets.
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ${{ env.TARBALL }}
-            ${{ env.TARBALL }}.sha256
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --generate-notes 2>/dev/null || true
+          fi
+          gh release upload "$TAG" "$TARBALL" "$TARBALL.sha256" --clobber
