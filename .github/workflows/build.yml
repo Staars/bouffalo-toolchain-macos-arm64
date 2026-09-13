@@ -17,8 +17,9 @@ env:
   XUANTIE_REF: V3.0.1 # tag; full commit is c66309b74edd581125a8165f07296c85d3fa71c9
   XUANTIE_BRANCH: xuantie-gnu-toolchain
   INSTALL_DIR: xuantie-gnu-toolchain/install
-  # Set to 'true' to add --enable-gdb (longer build). Default 'false' for faster Bouffalo SDK builds.
-  ENABLE_GDB: 'false'
+  # GDB is built by upstream default. 'true' (default) passes --enable-gdb and
+  # inits the gdb submodule; 'false' passes --disable-gdb for a faster GDB-less build.
+  ENABLE_GDB: 'true'
 
 jobs:
   build:
@@ -46,7 +47,9 @@ jobs:
       - name: Install Homebrew dependencies
         run: |
           brew update
-          brew install python3 gawk gnu-sed gmp mpfr libmpc isl zlib expat coreutils texinfo wget autoconf automake libtool pkg-config
+          # NOTE: `flock` is required — upstream's Makefile shells out to it when
+          # initializing submodules on demand, and macOS ships no flock(1).
+          brew install python3 gawk gnu-sed gmp mpfr libmpc isl zlib expat coreutils texinfo wget autoconf automake libtool pkg-config flock
 
       - name: Add GNU tools to PATH
         run: |
@@ -64,6 +67,8 @@ jobs:
           # riscv-collab/riscv-dejagnu ("not our ref"), and qemu/llvm/spike/pk/
           # musl/glibc/dejagnu are not needed for a bare-metal (newlib) build
           # anyway (upstream configure fetches required modules on demand).
+          # NOTE: default `make` builds GDB too (upstream default), so the gdb
+          # submodule must be present unless ENABLE_GDB=false (--disable-gdb).
           git submodule update --init binutils gcc newlib
           if [ "$ENABLE_GDB" = "true" ]; then
             git submodule update --init gdb
@@ -97,9 +102,9 @@ jobs:
       - name: Configure
         working-directory: xuantie-gnu-toolchain
         run: |
-          GDB_FLAG=""
-          if [ "$ENABLE_GDB" = "true" ]; then
-            GDB_FLAG="--enable-gdb"
+          GDB_FLAG="--enable-gdb"
+          if [ "$ENABLE_GDB" != "true" ]; then
+            GDB_FLAG="--disable-gdb"
           fi
           ./configure --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" --with-cmodel=medany --enable-multilib $GDB_FLAG
 

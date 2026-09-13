@@ -66,7 +66,7 @@ Wait ~1–2 hours, then check Releases. You can also trigger manually via Action
 
 To update the toolchain later, bump `XUANTIE_REF` in `.github/workflows/build.yml` to the new stable tag (check <https://github.com/XUANTIE-RV/xuantie-gnu-toolchain/releases>), commit, and push a new `v*` tag.
 
-To include GDB, set `ENABLE_GDB: 'true'` in `.github/workflows/build.yml` (default is `'false'` for a faster build).
+GDB is built by default (upstream default). To skip it for a faster build, set `ENABLE_GDB: 'false'` in `.github/workflows/build.yml` (passes `--disable-gdb`).
 
 ## Troubleshooting
 
