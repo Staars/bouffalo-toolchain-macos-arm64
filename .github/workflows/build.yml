@@ -18,6 +18,8 @@ env:
   XUANTIE_BRANCH: xuantie-gnu-toolchain
   INSTALL_DIR: xuantie-gnu-toolchain/install
   TARBALL: xuantie-gnu-toolchain-macos-arm64.tar.gz
+  # Set to 'true' to add --enable-gdb (longer build). Default 'false' for faster Bouffalo SDK builds.
+  ENABLE_GDB: 'false'
 
 jobs:
   build:
@@ -68,7 +70,11 @@ jobs:
       - name: Configure
         working-directory: xuantie-gnu-toolchain
         run: |
-          ./configure --prefix="$PWD/install" --with-cmodel=medany --enable-multilib
+          GDB_FLAG=""
+          if [ "$ENABLE_GDB" = "true" ]; then
+            GDB_FLAG="--enable-gdb"
+          fi
+          ./configure --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" --with-cmodel=medany --enable-multilib $GDB_FLAG
 
       - name: Build
         working-directory: xuantie-gnu-toolchain
@@ -76,19 +82,18 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)"
 
       - name: Verify native arm64 binaries
-        working-directory: xuantie-gnu-toolchain
         run: |
-          ./install/bin/riscv64-unknown-elf-gcc --version
-          file ./install/bin/riscv64-unknown-elf-gcc
+          "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" --version
+          file "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc"
           # Must print "arm64", not "x86_64"
-          file ./install/bin/riscv64-unknown-elf-gcc | grep -q "arm64"
-          otool -L ./install/bin/riscv64-unknown-elf-gcc || true
+          file "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" | grep -q "arm64"
+          otool -L "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" || true
 
       - name: Package
         run: |
-          tar -czf "$TARBALL" -C xuantie-gnu-toolchain/install .
-          shasum -a 256 "$TARBALL" | tee "$TARBALL.sha256"
-          ls -lh "$TARBALL" "$TARBALL.sha256"
+          tar -czf "$GITHUB_WORKSPACE/$TARBALL" -C "$GITHUB_WORKSPACE/$INSTALL_DIR" .
+          shasum -a 256 "$GITHUB_WORKSPACE/$TARBALL" | tee "$GITHUB_WORKSPACE/$TARBALL.sha256"
+          ls -lh "$GITHUB_WORKSPACE/$TARBALL" "$GITHUB_WORKSPACE/$TARBALL.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
