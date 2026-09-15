@@ -69,7 +69,7 @@ jobs:
           cd "$RUNNER_TEMP"
 
           # GMP 6.3.0
-          curl -fsSLO https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz
+          curl -fsSLO https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
           tar xf gmp-6.3.0.tar.xz
           ( cd gmp-6.3.0
             ./configure --prefix="$DEPS" --disable-shared --enable-static
