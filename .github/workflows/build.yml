@@ -49,12 +49,64 @@ jobs:
           brew update
           # NOTE: `flock` is required — upstream's Makefile shells out to it when
           # initializing submodules on demand, and macOS ships no flock(1).
-          brew install python3 gawk gnu-sed gmp mpfr libmpc isl zlib expat coreutils texinfo wget autoconf automake libtool pkg-config flock
+          # NOTE: gmp/mpfr/libmpc/isl are intentionally NOT installed here — they
+          # are built from source as static-only libs in the next step so that the
+          # resulting toolchain does not depend on Homebrew's dylibs (which bake
+          # /opt/homebrew absolute install_names into every Mach-O).
+          brew install python3 gawk gnu-sed zlib expat coreutils texinfo wget autoconf automake libtool pkg-config flock
 
       - name: Add GNU tools to PATH
         run: |
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
           echo "$(brew --prefix)/opt/gnu-sed/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Build static host dependencies (GMP, MPFR, MPC, ISL)
+        run: |
+          set -euo pipefail
+          DEPS="$RUNNER_TEMP/host-deps"
+          mkdir -p "$DEPS"
+          JOBS="$(sysctl -n hw.ncpu)"
+          cd "$RUNNER_TEMP"
+
+          # GMP 6.3.0
+          curl -fsSLO https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz
+          tar xf gmp-6.3.0.tar.xz
+          ( cd gmp-6.3.0
+            ./configure --prefix="$DEPS" --disable-shared --enable-static
+            make -j"$JOBS" && make install )
+
+          # MPFR 4.2.1
+          curl -fsSLO https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz
+          tar xf mpfr-4.2.1.tar.xz
+          ( cd mpfr-4.2.1
+            ./configure --prefix="$DEPS" --disable-shared --enable-static --with-gmp="$DEPS"
+            make -j"$JOBS" && make install )
+
+          # MPC 1.3.1
+          curl -fsSLO https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz
+          tar xf mpc-1.3.1.tar.gz
+          ( cd mpc-1.3.1
+            ./configure --prefix="$DEPS" --disable-shared --enable-static \
+              --with-gmp="$DEPS" --with-mpfr="$DEPS"
+            make -j"$JOBS" && make install )
+
+          # ISL 0.26 (compatible with the GCC used by Xuantie V3.0.1)
+          curl -fsSLO https://libisl.sourceforge.io/isl-0.26.tar.xz
+          tar xf isl-0.26.tar.xz
+          ( cd isl-0.26
+            ./configure --prefix="$DEPS" --disable-shared --enable-static \
+              --with-gmp-prefix="$DEPS"
+            make -j"$JOBS" && make install )
+
+          # Fail loudly if anything shared slipped in.
+          if find "$DEPS" -name '*.dylib' -print -quit | grep -q .; then
+            echo "ERROR: shared libraries were built into $DEPS"
+            find "$DEPS" -name '*.dylib'
+            exit 1
+          fi
+          ls -l "$DEPS/lib"
+
+          echo "HOST_DEPS=$DEPS" >> "$GITHUB_ENV"
 
       - name: Clone Xuantie GNU Toolchain (pinned)
         run: |
@@ -260,30 +312,48 @@ jobs:
           if [ "$ENABLE_GDB" != "true" ]; then
             GDB_FLAG="--disable-gdb"
           fi
-          # Static linking flags for GMP/MPFR/MPC/ISL
-          BREW_PREFIX="$(brew --prefix)"
-          LDFLAGS="-L${BREW_PREFIX}/opt/gmp/lib -L${BREW_PREFIX}/opt/mpfr/lib -L${BREW_PREFIX}/opt/libmpc/lib -L${BREW_PREFIX}/opt/isl/lib"
-          CPPFLAGS="-I${BREW_PREFIX}/opt/gmp/include -I${BREW_PREFIX}/opt/mpfr/include -I${BREW_PREFIX}/opt/libmpc/include -I${BREW_PREFIX}/opt/isl/include"
-          
-          ./configure --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" --with-cmodel=medany --enable-multilib $GDB_FLAG \
-            --with-gcc-dep-libs="$(brew --prefix)" \
+
+          # Use our static-only host deps, never Homebrew's dylibs.  The absolute
+          # install_names baked into Homebrew's libgmp/libmpfr/libmpc/libisl dylibs
+          # (/opt/homebrew/opt/.../lib*.dylib) would otherwise end up in every
+          # Mach-O of the toolchain and make the tarball non-portable.
+          export PKG_CONFIG_PATH=""
+          export PKG_CONFIG_LIBDIR="$HOST_DEPS/lib/pkgconfig"
+
+          ./configure \
+            --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" \
+            --with-cmodel=medany \
+            --enable-multilib \
+            $GDB_FLAG \
+            --with-gcc-dep-libs="$HOST_DEPS" \
             --with-stage1-ldflags="-static-libgcc" \
             --with-boot-ldflags="-static-libgcc -static-libstdc++" \
-            LDFLAGS="$LDFLAGS" \
-            CPPFLAGS="$CPPFLAGS"
+            LDFLAGS="-L$HOST_DEPS/lib" \
+            CPPFLAGS="-I$HOST_DEPS/include"
 
       - name: Build
         working-directory: xuantie-gnu-toolchain
         run: |
           make -j"$(sysctl -n hw.ncpu)"
 
-      - name: Verify native arm64 binaries
+      - name: Verify native arm64 binaries and no Homebrew deps
         run: |
-          "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" --version
-          file "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc"
-          # Must print "arm64", not "x86_64"
-          file "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" | grep -q "arm64"
-          otool -L "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" || true
+          GCC_BIN="$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc"
+          "$GCC_BIN" --version
+          file "$GCC_BIN" | tee /dev/stderr | grep -q "arm64"
+
+          # Fail if any Mach-O in the install tree references /opt/homebrew or
+          # /usr/local — that is exactly the failure mode we are guarding against.
+          if find "$GITHUB_WORKSPACE/$INSTALL_DIR" -type f -print0 \
+               | xargs -0 -n1 -P"$(sysctl -n hw.ncpu)" sh -c '
+                   file -b "$0" | grep -q "Mach-O" || exit 0
+                   otool -L "$0" 2>/dev/null
+                 ' \
+               | grep -E "^\s+/opt/homebrew|^\s+/usr/local"; then
+            echo "ERROR: Homebrew paths still present in the toolchain"
+            exit 1
+          fi
+          echo "All Mach-O binaries are self-contained."
 
       - name: Package
         run: |
