@@ -251,25 +251,37 @@ jobs:
           export PKG_CONFIG_PATH=""
           export PKG_CONFIG_LIBDIR="$HOST_DEPS/lib/pkgconfig"
 
+          # NOTE: --with-stage1-ldflags / --with-boot-ldflags / --without-zstd
+          # are GCC configure options, NOT top-level options.  The wrapper
+          # configure prints "unrecognized options" and silently drops them,
+          # so they are injected into CONFIGURE_GCC_DEP_LIBS below instead.
+          # That variable is expanded verbatim in every GCC configure call.
           ./configure \
             --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
             $GDB_FLAG \
             --with-gcc-dep-libs="$HOST_DEPS" \
-            --with-stage1-ldflags="-static-libgcc" \
-            --with-boot-ldflags="-static-libgcc -static-libstdc++" \
             LDFLAGS="-L$HOST_DEPS/lib" \
             CPPFLAGS="-I$HOST_DEPS/include"
 
-          # Disable zstd everywhere (see previous discussion).
+          [ -f Makefile ] || { echo "ERROR: no Makefile after configure" >&2; exit 1; }
           cp Makefile Makefile.bak
-          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
-          grep -q '^CONFIGURE_GCC_DEP_LIBS = --without-zstd' Makefile || {
-            echo "ERROR: CONFIGURE_GCC_DEP_LIBS patch failed (upstream format changed?)"
-            grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile.bak || true
-            exit 1
-          }
+
+          # Match on \s* before '=' — upstream uses three spaces here, and we
+          # want the patch to survive whitespace changes.
+          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=) |$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++" |' Makefile
+
+          echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
+          grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
+
+          grep -q '^CONFIGURE_GCC_DEP_LIBS.*--without-zstd'           Makefile \
+            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-stage1-ldflags' Makefile \
+            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-boot-ldflags'   Makefile \
+            || { echo "ERROR: CONFIGURE_GCC_DEP_LIBS patch failed"; \
+                 echo "--- original ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile.bak; \
+                 echo "--- patched  ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile; \
+                 exit 1; }
 
       - name: Build
         working-directory: xuantie-gnu-toolchain
@@ -409,19 +421,31 @@ jobs:
         run: |
           GDB_FLAG="--enable-gdb"; [ "$ENABLE_GDB" = "true" ] || GDB_FLAG="--disable-gdb"
 
+          # NOTE: --with-stage1-ldflags / --with-boot-ldflags / --without-zstd
+          # are GCC-only configure options — the top-level wrapper silently
+          # ignores them.  They are appended to CONFIGURE_GCC_DEP_LIBS below.
           ./configure \
             --host=x86_64-w64-mingw32 \
             --prefix="$(cygpath -u "$GITHUB_WORKSPACE")/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
-            $GDB_FLAG \
-            --with-stage1-ldflags="-static-libgcc" \
-            --with-boot-ldflags="-static-libgcc -static-libstdc++"
+            $GDB_FLAG
 
+          [ -f Makefile ] || { echo "ERROR: no Makefile after configure" >&2; exit 1; }
           cp Makefile Makefile.bak
-          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
-          grep -q '^CONFIGURE_GCC_DEP_LIBS = --without-zstd' Makefile \
-            || { echo "CONFIGURE_GCC_DEP_LIBS patch failed"; exit 1; }
+
+          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=) |$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++" |' Makefile
+
+          echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
+          grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
+
+          grep -q '^CONFIGURE_GCC_DEP_LIBS.*--without-zstd'           Makefile \
+            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-stage1-ldflags' Makefile \
+            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-boot-ldflags'   Makefile \
+            || { echo "ERROR: CONFIGURE_GCC_DEP_LIBS patch failed"; \
+                 echo "--- original ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile.bak; \
+                 echo "--- patched  ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile; \
+                 exit 1; }
 
       - name: Build (MSYS2)
         shell: msys2 {0}
