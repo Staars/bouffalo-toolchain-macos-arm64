@@ -49,9 +49,6 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew update
-          # `m4` is a documented riscv-gnu-toolchain dependency; macOS's
-          # /usr/bin/m4 is GNU M4 1.4.6 (2006) and is too old for newlib.
-          # `flock` is required by upstream's submodule-on-demand machinery.
           brew install python3 gawk gnu-sed zlib expat coreutils texinfo wget \
                        autoconf automake libtool pkg-config flock m4
 
@@ -78,8 +75,6 @@ jobs:
           JOBS="$( (sysctl -n hw.ncpu 2>/dev/null) || nproc )"
           cd "$RUNNER_TEMP"
 
-          # macOS x86_64 + Xcode 16 needs --disable-assembly for GMP; the
-          # assembler paths use 8-byte alignment and the linker now wants 16.
           GMP_EXTRA=""
           if [ "${{ runner.os }}" = "macOS" ] && [ "$(uname -m)" = "x86_64" ]; then
             GMP_EXTRA="--disable-assembly"
@@ -136,14 +131,12 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: xuantie-gnu-toolchain
         run: |
-          # config.host: drop old x86_64-darwin host fragments that break arm64.
           if [ -f gcc/gcc/config.host ]; then
             perl -pi -e 's/.*=host-darwin\.o$//' gcc/gcc/config.host || true
             perl -pi -e 's/.* x-darwin\.$//'      gcc/gcc/config.host || true
             git diff -- gcc/gcc/config.host || true
           fi
 
-          # zlib zutil.h: skip `#define fdopen(fd,mode) NULL` on Apple.
           for ZUTIL in binutils/zlib/zutil.h gdb/zlib/zutil.h; do
             if [ ! -f "$ZUTIL" ]; then echo "$ZUTIL not present, skipping"; continue; fi
             python3 - "$ZUTIL" <<'PYEOF'
@@ -171,7 +164,6 @@ jobs:
             git -C "${ZUTIL%%/*}" diff -- "${ZUTIL#*/}" || true
           done
 
-          # GDB enum-flags.h: newer Clang rejects the enum signedness detection.
           if [ -f gdb/gdbsupport/enum-flags.h ]; then
             python3 - gdb/gdbsupport/enum-flags.h <<'PYEOF'
           import pathlib, sys
@@ -205,7 +197,6 @@ jobs:
             git -C gdb diff -- gdbsupport/enum-flags.h || true
           fi
 
-          # GDB enum-flags selftests: explicit int casts for newer Clang.
           if [ -f gdb/gdb/unittests/enum-flags-selftests.c ]; then
             python3 - gdb/gdb/unittests/enum-flags-selftests.c <<'PYEOF'
           import pathlib, sys
@@ -233,7 +224,6 @@ jobs:
       - name: Patch (all Unix hosts)
         working-directory: xuantie-gnu-toolchain
         run: |
-          # newlib riscv pthread.c: broken relative include for config.h.
           if [ -f newlib/libc/machine/riscv/pthread.c ]; then
             python3 - newlib/libc/machine/riscv/pthread.c <<'PYEOF'
           import pathlib, sys
@@ -257,26 +247,26 @@ jobs:
           export PKG_CONFIG_PATH=""
           export PKG_CONFIG_LIBDIR="$HOST_DEPS/lib/pkgconfig"
 
-          # NOTE: --with-stage1-ldflags / --with-boot-ldflags are GCC-only
-          # options.  The top-level wrapper prints "unrecognized options" and
-          # drops them, so they are injected into CONFIGURE_GCC_DEP_LIBS
-          # (expanded verbatim in every GCC sub-configure) below.
           ./configure \
             --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
             $GDB_FLAG \
             --with-gcc-dep-libs="$HOST_DEPS" \
+            --with-stage1-ldflags="-static-libgcc" \
+            --with-boot-ldflags="-static-libgcc -static-libstdc++" \
             LDFLAGS="-L$HOST_DEPS/lib" \
             CPPFLAGS="-I$HOST_DEPS/include"
 
           [ -f Makefile ] || { echo "ERROR: no Makefile after configure" >&2; exit 1; }
           cp Makefile Makefile.bak
 
-          # \s* before '=' — upstream uses three spaces.
-          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=.*)$|$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++"|' Makefile
-
-          echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
+          # NOTE: this perl line is intentionally the version from the working
+          # YAML (single space, matches nothing, i.e. a no-op).  Used here as a
+          # bisection test to see whether the "\s* + ldflags" variant from the
+          # previous attempt is what broke the build.
+          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
+          echo "--- CONFIGURE_GCC_DEP_LIBS after perl ---"
           grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
 
       - name: Build
@@ -297,7 +287,6 @@ jobs:
           file "$GCC_BIN"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
-            # Hard fail on Homebrew paths in any shipped Mach-O.
             if find "$GITHUB_WORKSPACE/$INSTALL_DIR" -type f -print0 \
                  | xargs -0 -n1 -P4 sh -c '
                      file -b "$0" | grep -q "Mach-O" || exit 0
@@ -306,16 +295,6 @@ jobs:
                  | grep -E "^\s+/opt/homebrew|^\s+/usr/local"; then
               echo "ERROR: Homebrew paths still present"; exit 1
             fi
-            # Soft warning: cc1/cc1plus referencing dynamic C++ runtime.
-            echo "--- libstdc++ / libgcc_s references in libexec ---"
-            find "$GITHUB_WORKSPACE/$INSTALL_DIR/libexec" -type f -print0 2>/dev/null \
-              | xargs -0 -n1 -P4 sh -c '
-                  file -b "$0" | grep -q "Mach-O" || exit 0
-                  otool -L "$0" 2>/dev/null
-                ' \
-              | grep -E 'libstdc\+\+.*\.dylib|libgcc_s.*\.dylib' \
-              && echo "WARNING: shipped compilers reference dynamic C++/gcc_s runtime" \
-              || echo "OK: no dynamic libstdc++/libgcc_s references in libexec."
           else
             if find "$GITHUB_WORKSPACE/$INSTALL_DIR" -type f -perm -u+x -print0 \
                  | xargs -0 -n1 -P4 sh -c '
@@ -407,11 +386,13 @@ jobs:
             --prefix="$(cygpath -u "$GITHUB_WORKSPACE")/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
-            $GDB_FLAG
+            $GDB_FLAG \
+            --with-stage1-ldflags="-static-libgcc" \
+            --with-boot-ldflags="-static-libgcc -static-libstdc++"
 
           [ -f Makefile ] || { echo "ERROR: no Makefile"; exit 1; }
           cp Makefile Makefile.bak
-          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=.*)$|$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++"|' Makefile
+          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
           grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
 
       - name: Build (MSYS2)
