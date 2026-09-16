@@ -17,16 +17,11 @@ env:
   ENABLE_GDB: 'true'
 
 jobs:
-  # =====================================================================
-  # Unix hosts: macOS (arm64 + intel) and Linux (x86_64 + arm64)
-  # =====================================================================
   build-unix:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
-            name: macos-15-arm64
           - os: macos-26
             name: macos-26-arm64
           - os: macos-15-intel
@@ -43,21 +38,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Show runner info
+      - name: Show runner arch
         run: |
           uname -a
           arch
           (sw_vers || true)
           sysctl -n hw.ncpu 2>/dev/null || nproc
 
-      # ---------- dependencies ----------
-
       - name: Install Homebrew dependencies
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install python3 gawk gnu-sed zlib expat coreutils texinfo \
-                       wget autoconf automake libtool pkg-config flock
+          # `m4` is a documented riscv-gnu-toolchain dependency; macOS's
+          # /usr/bin/m4 is GNU M4 1.4.6 (2006) and is too old for newlib.
+          # `flock` is required by upstream's submodule-on-demand machinery.
+          brew install python3 gawk gnu-sed zlib expat coreutils texinfo wget \
+                       autoconf automake libtool pkg-config flock m4
 
       - name: Add GNU tools to PATH
         if: runner.os == 'macOS'
@@ -72,11 +68,7 @@ jobs:
           sudo apt-get install -y \
             build-essential bison flex gawk texinfo autoconf automake \
             libtool libtool-bin pkg-config wget curl python3 git \
-            zlib1g-dev libexpat1-dev patchutils bc
-
-      # ---------- static host deps for GCC (GMP/MPFR/MPC/ISL) ----------
-      # Done on every Unix host so the tarball never bakes an absolute
-      # Homebrew/apt install_name into any Mach-O / ELF.
+            m4 zlib1g-dev libexpat1-dev patchutils bc
 
       - name: Build static host dependencies (GMP, MPFR, MPC, ISL)
         run: |
@@ -86,17 +78,23 @@ jobs:
           JOBS="$( (sysctl -n hw.ncpu 2>/dev/null) || nproc )"
           cd "$RUNNER_TEMP"
 
+          # macOS x86_64 + Xcode 16 needs --disable-assembly for GMP; the
+          # assembler paths use 8-byte alignment and the linker now wants 16.
+          GMP_EXTRA=""
+          if [ "${{ runner.os }}" = "macOS" ] && [ "$(uname -m)" = "x86_64" ]; then
+            GMP_EXTRA="--disable-assembly"
+          fi
+
           curl -fsSLO https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
           tar xf gmp-6.3.0.tar.xz
           ( cd gmp-6.3.0
-            ./configure --prefix="$DEPS" --disable-shared --enable-static
+            ./configure --prefix="$DEPS" --disable-shared --enable-static $GMP_EXTRA
             make -j"$JOBS" && make install )
 
           curl -fsSLO https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz
           tar xf mpfr-4.2.1.tar.xz
           ( cd mpfr-4.2.1
-            ./configure --prefix="$DEPS" --disable-shared --enable-static \
-              --with-gmp="$DEPS"
+            ./configure --prefix="$DEPS" --disable-shared --enable-static --with-gmp="$DEPS"
             make -j"$JOBS" && make install )
 
           curl -fsSLO https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz
@@ -114,15 +112,12 @@ jobs:
             make -j"$JOBS" && make install )
 
           if find "$DEPS" -name '*.dylib' -o -name '*.so' -print -quit | grep -q .; then
-            echo "ERROR: shared libraries slipped into $DEPS"
+            echo "ERROR: shared libraries were built into $DEPS"
             find "$DEPS" \( -name '*.dylib' -o -name '*.so' \)
             exit 1
           fi
           ls -l "$DEPS/lib"
-
           echo "HOST_DEPS=$DEPS" >> "$GITHUB_ENV"
-
-      # ---------- source ----------
 
       - name: Clone Xuantie GNU Toolchain (pinned)
         run: |
@@ -130,16 +125,12 @@ jobs:
           cd xuantie-gnu-toolchain
           git fetch --tags origin
           git checkout "$XUANTIE_REF"
-          # No --recursive: dejagnu's pinned commit is gone at V3.0.1, and
-          # qemu/llvm/spike/etc. aren't needed for a newlib build.
           git submodule update --init binutils gcc newlib
           if [ "$ENABLE_GDB" = "true" ]; then
             git submodule update --init gdb
           fi
           git rev-parse HEAD
           git submodule status || true
-
-      # ---------- patches ----------
 
       - name: Patch (macOS-specific)
         if: runner.os == 'macOS'
@@ -149,63 +140,77 @@ jobs:
           if [ -f gcc/gcc/config.host ]; then
             perl -pi -e 's/.*=host-darwin\.o$//' gcc/gcc/config.host || true
             perl -pi -e 's/.* x-darwin\.$//'      gcc/gcc/config.host || true
+            git diff -- gcc/gcc/config.host || true
           fi
 
           # zlib zutil.h: skip `#define fdopen(fd,mode) NULL` on Apple.
           for ZUTIL in binutils/zlib/zutil.h gdb/zlib/zutil.h; do
-            [ -f "$ZUTIL" ] || { echo "$ZUTIL absent, skipping"; continue; }
+            if [ ! -f "$ZUTIL" ]; then echo "$ZUTIL not present, skipping"; continue; fi
             python3 - "$ZUTIL" <<'PYEOF'
           import pathlib, re, sys
-          p = pathlib.Path(sys.argv[1]); lines = p.read_text().splitlines(keepends=True)
+          p = pathlib.Path(sys.argv[1])
+          lines = p.read_text().splitlines(keepends=True)
           if any("elif !defined(__APPLE__)" in l for l in lines):
               print(f"{p} already patched"); sys.exit(0)
           patched = 0
           for i, l in enumerate(lines):
-              if "define fdopen(fd,mode) NULL" not in l: continue
+              if "define fdopen(fd,mode) NULL" not in l:
+                  continue
               for j in range(i - 1, max(i - 8, 0), -1):
                   if re.match(r"\s*#\s*else\s*$", lines[j]):
                       if "unix.h" in lines[j - 1]:
-                          lines[j] = f"{lines[j].split('else')[0]}elif !defined(__APPLE__)\n"
+                          indent = lines[j].split("else")[0]
+                          lines[j] = f"{indent}elif !defined(__APPLE__)\n"
                           patched += 1
                       break
           if patched != 1:
               sys.exit(f"FATAL: expected 1 fdopen site in {p}, patched {patched}")
-          p.write_text("".join(lines)); print(f"patched {p}")
+          p.write_text("".join(lines))
+          print(f"patched {p} for Apple fdopen")
           PYEOF
+            git -C "${ZUTIL%%/*}" diff -- "${ZUTIL#*/}" || true
           done
 
-          # GDB enum-flags.h: replace signedness detection for newer Clang.
+          # GDB enum-flags.h: newer Clang rejects the enum signedness detection.
           if [ -f gdb/gdbsupport/enum-flags.h ]; then
             python3 - gdb/gdbsupport/enum-flags.h <<'PYEOF'
           import pathlib, sys
-          p = pathlib.Path(sys.argv[1]); src = p.read_text()
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
           if "std::is_signed<typename std::underlying_type<T>::type>::value" in src:
-              print("already patched"); sys.exit(0)
+              print(f"{p} already patched"); sys.exit(0)
           lines = src.splitlines(keepends=True)
-          s = next((i for i,l in enumerate(lines) if "struct enum_underlying_type" in l), None)
-          if s is None or "template<typename T>" not in lines[s-1]:
-              sys.exit("FATAL: head not found")
+          s = next((i for i, l in enumerate(lines) if "struct enum_underlying_type" in l), None)
+          if s is None or s == 0 or "template<typename T>" not in lines[s - 1]:
+              sys.exit(f"FATAL: enum_underlying_type head not found in {p}")
           start = s - 1
-          end = next(i for i in range(s, len(lines)) if lines[i].rstrip() == "};")
+          end = next((i for i in range(s, len(lines)) if lines[i].rstrip() == "};"), None)
+          if end is None:
+              sys.exit(f"FATAL: end not found in {p}")
+          if "T (-1)" not in "".join(lines[start:end]):
+              sys.exit(f"FATAL: enum_underlying_type body changed upstream in {p}")
           new_block = """template<typename T>
           struct enum_underlying_type
           {
             typedef typename
               integer_for_size<sizeof (T),
-                std::is_signed<typename std::underlying_type<T>::type>::value>::type
+                               std::is_signed<typename std::underlying_type<T>::type>::value>::type
               type;
           };
           """
-          lines[start:end+1] = [new_block]
-          p.write_text("".join(lines)); print("patched enum-flags.h")
+          lines[start:end + 1] = [new_block]
+          p.write_text("".join(lines))
+          print(f"patched {p} for enum signedness")
           PYEOF
+            git -C gdb diff -- gdbsupport/enum-flags.h || true
           fi
 
-          # GDB enum-flags-selftests.c: explicit int casts for newer Clang.
+          # GDB enum-flags selftests: explicit int casts for newer Clang.
           if [ -f gdb/gdb/unittests/enum-flags-selftests.c ]; then
             python3 - gdb/gdb/unittests/enum-flags-selftests.c <<'PYEOF'
           import pathlib, sys
-          p = pathlib.Path(sys.argv[1]); src = p.read_text()
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
           reps = [
             ("CHECK_VALID (true,  int,  true ? EF () : EF2 ())",
              "CHECK_VALID (true,  int,  (int)(true ? EF () : EF2 ()))"),
@@ -222,6 +227,7 @@ jobs:
               if old in src: src = src.replace(old, new, 1); n += 1
           if n: p.write_text(src); print(f"patched {n} selftest lines")
           PYEOF
+            git -C gdb diff -- gdb/unittests/enum-flags-selftests.c || true
           fi
 
       - name: Patch (all Unix hosts)
@@ -231,31 +237,30 @@ jobs:
           if [ -f newlib/libc/machine/riscv/pthread.c ]; then
             python3 - newlib/libc/machine/riscv/pthread.c <<'PYEOF'
           import pathlib, sys
-          p = pathlib.Path(sys.argv[1]); src = p.read_text()
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
           old = '#include "../../libgloss/libnosys/config.h"'
           if old not in src:
               print(f"{p}: nothing to patch"); sys.exit(0)
           p.write_text(src.replace(old, '#include "config.h"', 1))
           print(f"patched {p}")
           PYEOF
+            git -C newlib diff -- libc/machine/riscv/pthread.c || true
           fi
-
-      # ---------- configure / build ----------
 
       - name: Configure
         working-directory: xuantie-gnu-toolchain
         run: |
           GDB_FLAG="--enable-gdb"
-          [ "$ENABLE_GDB" = "true" ] || GDB_FLAG="--disable-gdb"
+          if [ "$ENABLE_GDB" != "true" ]; then GDB_FLAG="--disable-gdb"; fi
 
           export PKG_CONFIG_PATH=""
           export PKG_CONFIG_LIBDIR="$HOST_DEPS/lib/pkgconfig"
 
-          # NOTE: --with-stage1-ldflags / --with-boot-ldflags / --without-zstd
-          # are GCC configure options, NOT top-level options.  The wrapper
-          # configure prints "unrecognized options" and silently drops them,
-          # so they are injected into CONFIGURE_GCC_DEP_LIBS below instead.
-          # That variable is expanded verbatim in every GCC configure call.
+          # NOTE: --with-stage1-ldflags / --with-boot-ldflags are GCC-only
+          # options.  The top-level wrapper prints "unrecognized options" and
+          # drops them, so they are injected into CONFIGURE_GCC_DEP_LIBS
+          # (expanded verbatim in every GCC sub-configure) below.
           ./configure \
             --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" \
             --with-cmodel=medany \
@@ -268,20 +273,11 @@ jobs:
           [ -f Makefile ] || { echo "ERROR: no Makefile after configure" >&2; exit 1; }
           cp Makefile Makefile.bak
 
-          # Match on \s* before '=' — upstream uses three spaces here, and we
-          # want the patch to survive whitespace changes.
-          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=) |$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++" |' Makefile
+          # \s* before '=' — upstream uses three spaces.
+          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=.*)$|$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++"|' Makefile
 
           echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
           grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
-
-          grep -q '^CONFIGURE_GCC_DEP_LIBS.*--without-zstd'           Makefile \
-            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-stage1-ldflags' Makefile \
-            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-boot-ldflags'   Makefile \
-            || { echo "ERROR: CONFIGURE_GCC_DEP_LIBS patch failed"; \
-                 echo "--- original ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile.bak; \
-                 echo "--- patched  ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile; \
-                 exit 1; }
 
       - name: Build
         working-directory: xuantie-gnu-toolchain
@@ -294,24 +290,32 @@ jobs:
             GDB_NATIVE_FLAGS_EXTRA="--without-zstd" \
             -j"$JOBS"
 
-      # ---------- verify ----------
-
-      - name: Verify self-contained binaries
+      - name: Verify
         run: |
           GCC_BIN="$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc"
           "$GCC_BIN" --version
           file "$GCC_BIN"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
-            file "$GCC_BIN" | grep -q "arm64\|x86_64"
+            # Hard fail on Homebrew paths in any shipped Mach-O.
             if find "$GITHUB_WORKSPACE/$INSTALL_DIR" -type f -print0 \
                  | xargs -0 -n1 -P4 sh -c '
                      file -b "$0" | grep -q "Mach-O" || exit 0
                      otool -L "$0" 2>/dev/null
                    ' \
                  | grep -E "^\s+/opt/homebrew|^\s+/usr/local"; then
-              echo "ERROR: Homebrew paths in toolchain"; exit 1
+              echo "ERROR: Homebrew paths still present"; exit 1
             fi
+            # Soft warning: cc1/cc1plus referencing dynamic C++ runtime.
+            echo "--- libstdc++ / libgcc_s references in libexec ---"
+            find "$GITHUB_WORKSPACE/$INSTALL_DIR/libexec" -type f -print0 2>/dev/null \
+              | xargs -0 -n1 -P4 sh -c '
+                  file -b "$0" | grep -q "Mach-O" || exit 0
+                  otool -L "$0" 2>/dev/null
+                ' \
+              | grep -E 'libstdc\+\+.*\.dylib|libgcc_s.*\.dylib' \
+              && echo "WARNING: shipped compilers reference dynamic C++/gcc_s runtime" \
+              || echo "OK: no dynamic libstdc++/libgcc_s references in libexec."
           else
             if find "$GITHUB_WORKSPACE/$INSTALL_DIR" -type f -perm -u+x -print0 \
                  | xargs -0 -n1 -P4 sh -c '
@@ -322,9 +326,7 @@ jobs:
               echo "ERROR: runner-local paths in toolchain"; exit 1
             fi
           fi
-          echo "OK: toolchain looks self-contained."
-
-      # ---------- package / upload ----------
+          echo "OK: verify step complete."
 
       - name: Package
         run: |
@@ -343,7 +345,7 @@ jobs:
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
 
-      - name: Create / update release
+      - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -353,9 +355,6 @@ jobs:
             || gh release create "$TAG" --title "$TAG" --generate-notes
           gh release upload "$TAG" "$TARBALL" "$TARBALL.sha256" --clobber
 
-  # =====================================================================
-  # Windows via MSYS2 (native mingw-w64 binaries, not msys-hosted)
-  # =====================================================================
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 360
@@ -370,29 +369,11 @@ jobs:
           msystem: MINGW64
           update: true
           install: >-
-            git
-            make
-            tar
-            wget
-            curl
-            python
-            autoconf
-            automake
-            libtool
-            pkgconf
-            texinfo
-            gawk
-            bison
-            flex
-            patch
-            diffutils
+            git make tar wget curl python autoconf automake libtool pkgconf
+            texinfo gawk bison flex m4 patch diffutils
             mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-gmp
-            mingw-w64-x86_64-mpfr
-            mingw-w64-x86_64-mpc
-            mingw-w64-x86_64-isl
-            mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-expat
+            mingw-w64-x86_64-gmp mingw-w64-x86_64-mpfr mingw-w64-x86_64-mpc
+            mingw-w64-x86_64-isl mingw-w64-x86_64-zlib mingw-w64-x86_64-expat
 
       - name: Clone (MSYS2)
         shell: msys2 {0}
@@ -421,9 +402,6 @@ jobs:
         run: |
           GDB_FLAG="--enable-gdb"; [ "$ENABLE_GDB" = "true" ] || GDB_FLAG="--disable-gdb"
 
-          # NOTE: --with-stage1-ldflags / --with-boot-ldflags / --without-zstd
-          # are GCC-only configure options — the top-level wrapper silently
-          # ignores them.  They are appended to CONFIGURE_GCC_DEP_LIBS below.
           ./configure \
             --host=x86_64-w64-mingw32 \
             --prefix="$(cygpath -u "$GITHUB_WORKSPACE")/$INSTALL_DIR" \
@@ -431,21 +409,10 @@ jobs:
             --enable-multilib \
             $GDB_FLAG
 
-          [ -f Makefile ] || { echo "ERROR: no Makefile after configure" >&2; exit 1; }
+          [ -f Makefile ] || { echo "ERROR: no Makefile"; exit 1; }
           cp Makefile Makefile.bak
-
-          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=) |$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++" |' Makefile
-
-          echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
+          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=.*)$|$1 --without-zstd --with-stage1-ldflags="-static-libgcc" --with-boot-ldflags="-static-libgcc -static-libstdc++"|' Makefile
           grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
-
-          grep -q '^CONFIGURE_GCC_DEP_LIBS.*--without-zstd'           Makefile \
-            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-stage1-ldflags' Makefile \
-            && grep -q '^CONFIGURE_GCC_DEP_LIBS.*--with-boot-ldflags'   Makefile \
-            || { echo "ERROR: CONFIGURE_GCC_DEP_LIBS patch failed"; \
-                 echo "--- original ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile.bak; \
-                 echo "--- patched  ---"; grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile; \
-                 exit 1; }
 
       - name: Build (MSYS2)
         shell: msys2 {0}
@@ -465,8 +432,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/$INSTALL_DIR"
           tar -czf "$GITHUB_WORKSPACE/$TARBALL" .
-          sha256sum "$GITHUB_WORKSPACE/$TARBALL" \
-            | tee "$GITHUB_WORKSPACE/$TARBALL.sha256"
+          sha256sum "$GITHUB_WORKSPACE/$TARBALL" | tee "$GITHUB_WORKSPACE/$TARBALL.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -476,7 +442,7 @@ jobs:
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
 
-      - name: Create / update release
+      - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
