@@ -326,6 +326,7 @@ jobs:
             --enable-multilib \
             $GDB_FLAG \
             --with-gcc-dep-libs="$HOST_DEPS" \
+            --without-zstd \
             --with-stage1-ldflags="-static-libgcc" \
             --with-boot-ldflags="-static-libgcc -static-libstdc++" \
             LDFLAGS="-L$HOST_DEPS/lib" \
