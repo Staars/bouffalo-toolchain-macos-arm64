@@ -53,6 +53,9 @@ jobs:
           # are built from source as static-only libs in the next step so that the
           # resulting toolchain does not depend on Homebrew's dylibs (which bake
           # /opt/homebrew absolute install_names into every Mach-O).
+          # NOTE: `zstd` is also intentionally NOT installed, but it may be pulled in
+          # transitively (e.g. by python3). We cannot rely on its absence, so we
+          # disable zstd explicitly at configure time below.
           brew install python3 gawk gnu-sed zlib expat coreutils texinfo wget autoconf automake libtool pkg-config flock
 
       - name: Add GNU tools to PATH
@@ -313,29 +316,51 @@ jobs:
             GDB_FLAG="--disable-gdb"
           fi
 
-          # Use our static-only host deps, never Homebrew's dylibs.  The absolute
-          # install_names baked into Homebrew's libgmp/libmpfr/libmpc/libisl dylibs
-          # (/opt/homebrew/opt/.../lib*.dylib) would otherwise end up in every
-          # Mach-O of the toolchain and make the tarball non-portable.
+          # Use our static-only host deps, never Homebrew's dylibs.
           export PKG_CONFIG_PATH=""
           export PKG_CONFIG_LIBDIR="$HOST_DEPS/lib/pkgconfig"
 
+          # NOTE: do NOT pass --without-zstd here.  The top-level riscv-gnu-toolchain
+          # configure script has no such option and silently ignores it.  Instead,
+          # we inject it into the generated Makefile below, where it reaches GCC's
+          # configure via CONFIGURE_GCC_DEP_LIBS.
           ./configure \
             --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
             $GDB_FLAG \
             --with-gcc-dep-libs="$HOST_DEPS" \
-            --without-zstd \
             --with-stage1-ldflags="-static-libgcc" \
             --with-boot-ldflags="-static-libgcc -static-libstdc++" \
             LDFLAGS="-L$HOST_DEPS/lib" \
             CPPFLAGS="-I$HOST_DEPS/include"
 
+          # Inject --without-zstd into CONFIGURE_GCC_DEP_LIBS.  This variable is
+          # passed verbatim to every GCC configure invocation (stage1, stage2).
+          # The top-level configure has no --without-zstd option and the Makefile
+          # has no GCC_EXTRA_CONFIGURE_FLAGS, so this is the only reliable hook.
+          if [ ! -f Makefile ]; then
+            echo "ERROR: Makefile not found after configure" >&2
+            exit 1
+          fi
+          cp Makefile Makefile.bak
+          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
+          echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
+          grep '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
+
       - name: Build
         working-directory: xuantie-gnu-toolchain
         run: |
-          make -j"$(sysctl -n hw.ncpu)"
+          # Belt and braces: also disable zstd in binutils and GDB, which each
+          # have their own zstd detection (pkg-config based).  These variables
+          # ARE supported by the riscv-gnu-toolchain Makefile (see Makefile.in
+          # lines 46-50).
+          make \
+            BINUTILS_TARGET_FLAGS_EXTRA="--without-zstd" \
+            BINUTILS_NATIVE_FLAGS_EXTRA="--without-zstd" \
+            GDB_TARGET_FLAGS_EXTRA="--without-zstd" \
+            GDB_NATIVE_FLAGS_EXTRA="--without-zstd" \
+            -j"$(sysctl -n hw.ncpu)"
 
       - name: Verify native arm64 binaries and no Homebrew deps
         run: |
