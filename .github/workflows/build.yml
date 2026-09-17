@@ -441,6 +441,84 @@ jobs:
           git rev-parse HEAD
           git submodule status || true
 
+      - name: Patch libcody for C++20 char8_t (MSYS2)
+        shell: msys2 {0}
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          CODY="gcc/libcody/cody.hh"
+          if [ ! -f "$CODY" ]; then
+            echo "ERROR: $CODY not found"; exit 1
+          fi
+          echo "Patching $CODY"
+          python - "$CODY" <<'PYEOF'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          txt = p.read_text()
+
+          if "char8_t const (&s)" in txt:
+              print("cody.hh already patched for char8_t")
+              sys.exit(0)
+
+          needle = "constexpr char S2C (char const (&s)[I])"
+          if needle not in txt:
+              sys.exit("FATAL: S2C signature not found in cody.hh")
+
+          start = txt.index(needle)
+          brace = txt.index("{", start)
+          depth = 0
+          end = None
+          for i in range(brace, len(txt)):
+              ch = txt[i]
+              if ch == "{":
+                  depth += 1
+              elif ch == "}":
+                  depth -= 1
+                  if depth == 0:
+                      end = i + 1
+                      break
+
+          if end is None:
+              sys.exit("FATAL: S2C function body not found in cody.hh")
+
+          insertion = """
+          #if defined(__cpp_char8_t) && __cpp_char8_t >= 201811
+          template<unsigned int I>
+          constexpr char S2C (char8_t const (&s)[I])
+          {
+            return static_cast<char>(s[0]);
+          }
+          #endif
+          """
+
+          p.write_text(txt[:end] + insertion + txt[end:])
+          print("Patched cody.hh: added char8_t overload of S2C")
+          PYEOF
+
+          for FILE in gcc/libcody/client.cc gcc/libcody/server.cc; do
+            [ -f "$FILE" ] || { echo "$FILE not found, skipping"; continue; }
+            echo "Patching $FILE"
+            python - "$FILE" <<'PYEOF'
+          import pathlib, re, sys
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          if "(const char *) u8" in src:
+              print(f"{p} already patched"); sys.exit(0)
+          pat = re.compile(r'(?<!\)\s)u8"([^"]*)"')
+          n = 0
+          def repl(m):
+              global n
+              n += 1
+              return f'(const char *) u8"{m.group(1)}"'
+          src = pat.sub(repl, src)
+          if n:
+              p.write_text(src)
+              print(f"Patched {n} u8 literals in {p.name}")
+          else:
+              print(f"No u8 literals found in {p.name}")
+          PYEOF
+          done
+          git diff -- gcc/libcody/cody.hh gcc/libcody/client.cc gcc/libcody/server.cc || true
+
       - name: Patch newlib pthread (MSYS2)
         shell: msys2 {0}
         working-directory: xuantie-gnu-toolchain
