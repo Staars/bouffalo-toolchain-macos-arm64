@@ -24,8 +24,6 @@ jobs:
         include:
           - os: macos-26
             name: macos-26-arm64
-          - os: macos-15-intel
-            name: macos-intel
           - os: ubuntu-22.04
             name: linux-x86_64
           - os: ubuntu-24.04-arm
@@ -75,31 +73,57 @@ jobs:
           JOBS="$( (sysctl -n hw.ncpu 2>/dev/null) || nproc )"
           cd "$RUNNER_TEMP"
 
-          GMP_EXTRA=""
-          if [ "${{ runner.os }}" = "macOS" ] && [ "$(uname -m)" = "x86_64" ]; then
-            GMP_EXTRA="--disable-assembly"
-          fi
+          # Download helper: retries with backoff, then walks a mirror list.
+          # SourceForge / ftp.gnu.org DNS for these hosts is known to flake
+          # from GitHub runners (we have seen "Could not resolve host:
+          # libisl.sourceforge.io").
+          fetch_tarball() {
+            local out="$1"; shift
+            for url in "$@"; do
+              echo "Fetching $out from $url"
+              if curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+                      --connect-timeout 30 -o "$out" "$url"; then
+                echo "  ok"
+                return 0
+              fi
+              echo "  failed, trying next mirror"
+              rm -f "$out"
+            done
+            echo "ERROR: could not fetch $out from any mirror"
+            return 1
+          }
 
-          curl -fsSLO https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz
+          fetch_tarball gmp-6.3.0.tar.xz \
+            https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz \
+            https://gmplib.org/download/gmp/gmp-6.3.0.tar.xz
+
+          fetch_tarball mpfr-4.2.1.tar.xz \
+            https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz
+
+          fetch_tarball mpc-1.3.1.tar.gz \
+            https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz
+
+          fetch_tarball isl-0.26.tar.xz \
+            https://libisl.sourceforge.io/isl-0.26.tar.xz \
+            https://downloads.sourceforge.net/project/libisl/isl-0.26.tar.xz \
+            https://master.dl.sourceforge.net/project/libisl/isl-0.26.tar.xz
+
           tar xf gmp-6.3.0.tar.xz
           ( cd gmp-6.3.0
-            ./configure --prefix="$DEPS" --disable-shared --enable-static $GMP_EXTRA
+            ./configure --prefix="$DEPS" --disable-shared --enable-static
             make -j"$JOBS" && make install )
 
-          curl -fsSLO https://ftp.gnu.org/gnu/mpfr/mpfr-4.2.1.tar.xz
           tar xf mpfr-4.2.1.tar.xz
           ( cd mpfr-4.2.1
             ./configure --prefix="$DEPS" --disable-shared --enable-static --with-gmp="$DEPS"
             make -j"$JOBS" && make install )
 
-          curl -fsSLO https://ftp.gnu.org/gnu/mpc/mpc-1.3.1.tar.gz
           tar xf mpc-1.3.1.tar.gz
           ( cd mpc-1.3.1
             ./configure --prefix="$DEPS" --disable-shared --enable-static \
               --with-gmp="$DEPS" --with-mpfr="$DEPS"
             make -j"$JOBS" && make install )
 
-          curl -fsSLO https://libisl.sourceforge.io/isl-0.26.tar.xz
           tar xf isl-0.26.tar.xz
           ( cd isl-0.26
             ./configure --prefix="$DEPS" --disable-shared --enable-static \
@@ -136,16 +160,6 @@ jobs:
       - name: Patch readline for C23 (all hosts)
         working-directory: xuantie-gnu-toolchain
         run: |
-          # GCC 15 / C23 changed the meaning of `f()` in a declaration from
-          # "unspecified args" to "no args".  Readline's bundled signals.c
-          # declares `typedef RETSIGTYPE SigHandler ();` which becomes
-          # `void SigHandler(void)`, so passing `void rl_signal_handler(int)`
-          # to it is now a hard type error:
-          #   error: passing argument 2 of 'rl_maybe_set_sighandler' from
-          #          incompatible pointer type
-          # Upstream fix (gdb-patches, readline 8.2 import): add the `int`.
-          # Also fix SIGHANDLER_RETURN, which expands to `return (0)` in a
-          # void function when VOID_SIGHANDLER is not defined.
           SIGNALS=""
           for CAND in gdb/readline/readline/signals.c \
                       readline/readline/signals.c ; do
@@ -161,8 +175,6 @@ jobs:
           p = pathlib.Path(sys.argv[1])
           src = p.read_text()
           changed = False
-
-          # 1) SigHandler must take an int argument.
           new_typedef = "typedef RETSIGTYPE SigHandler (int);"
           if new_typedef in src:
               print("SigHandler typedef already patched")
@@ -173,16 +185,13 @@ jobs:
                   sys.exit("FATAL: SigHandler typedef not found")
               changed = True
               print("Patched SigHandler typedef for C23")
-
-          # 2) SIGHANDLER_RETURN must not return a value in a void function.
           pat = re.compile(r'(#\s*define\s+SIGHANDLER_RETURN\s+)return\s*\(0\)')
           src, n = pat.subn(r'\1return', src, count=1)
           if n:
               changed = True
               print("Patched SIGHANDLER_RETURN for C23")
           else:
-              print("SIGHANDLER_RETURN already correct (or VOID_SIGHANDLER defined)")
-
+              print("SIGHANDLER_RETURN already correct")
           if changed:
               p.write_text(src)
           PYEOF
