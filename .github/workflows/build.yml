@@ -112,7 +112,13 @@ jobs:
             exit 1
           fi
           ls -l "$DEPS/lib"
-          echo "HOST_DEPS=$DEPS" >> "$GITHUB_ENV"
+
+          {
+            echo "HOST_DEPS=$DEPS"
+            echo "PKG_CONFIG_PATH="
+            echo "PKG_CONFIG_LIBDIR=$DEPS/lib/pkgconfig"
+            echo "PKG_CONFIG_SYSROOT_DIR="
+          } >> "$GITHUB_ENV"
 
       - name: Clone Xuantie GNU Toolchain (pinned)
         run: |
@@ -126,6 +132,61 @@ jobs:
           fi
           git rev-parse HEAD
           git submodule status || true
+
+      - name: Patch readline for C23 (all hosts)
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          # GCC 15 / C23 changed the meaning of `f()` in a declaration from
+          # "unspecified args" to "no args".  Readline's bundled signals.c
+          # declares `typedef RETSIGTYPE SigHandler ();` which becomes
+          # `void SigHandler(void)`, so passing `void rl_signal_handler(int)`
+          # to it is now a hard type error:
+          #   error: passing argument 2 of 'rl_maybe_set_sighandler' from
+          #          incompatible pointer type
+          # Upstream fix (gdb-patches, readline 8.2 import): add the `int`.
+          # Also fix SIGHANDLER_RETURN, which expands to `return (0)` in a
+          # void function when VOID_SIGHANDLER is not defined.
+          SIGNALS=""
+          for CAND in gdb/readline/readline/signals.c \
+                      readline/readline/signals.c ; do
+            [ -f "$CAND" ] && SIGNALS="$CAND" && break
+          done
+          if [ -z "$SIGNALS" ]; then
+            echo "readline signals.c not found, skipping C23 patch"
+            exit 0
+          fi
+          echo "Patching $SIGNALS"
+          python3 - "$SIGNALS" <<'PYEOF'
+          import pathlib, re, sys
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          changed = False
+
+          # 1) SigHandler must take an int argument.
+          new_typedef = "typedef RETSIGTYPE SigHandler (int);"
+          if new_typedef in src:
+              print("SigHandler typedef already patched")
+          else:
+              pat = re.compile(r'typedef\s+RETSIGTYPE\s+SigHandler\s*\(\s*\)\s*;')
+              src, n = pat.subn(new_typedef, src, count=1)
+              if n != 1:
+                  sys.exit("FATAL: SigHandler typedef not found")
+              changed = True
+              print("Patched SigHandler typedef for C23")
+
+          # 2) SIGHANDLER_RETURN must not return a value in a void function.
+          pat = re.compile(r'(#\s*define\s+SIGHANDLER_RETURN\s+)return\s*\(0\)')
+          src, n = pat.subn(r'\1return', src, count=1)
+          if n:
+              changed = True
+              print("Patched SIGHANDLER_RETURN for C23")
+          else:
+              print("SIGHANDLER_RETURN already correct (or VOID_SIGHANDLER defined)")
+
+          if changed:
+              p.write_text(src)
+          PYEOF
+          git diff -- "$SIGNALS" || true
 
       - name: Patch (macOS-specific)
         if: runner.os == 'macOS'
@@ -244,40 +305,36 @@ jobs:
           GDB_FLAG="--enable-gdb"
           if [ "$ENABLE_GDB" != "true" ]; then GDB_FLAG="--disable-gdb"; fi
 
-          export PKG_CONFIG_PATH=""
-          export PKG_CONFIG_LIBDIR="$HOST_DEPS/lib/pkgconfig"
-
           ./configure \
             --prefix="$GITHUB_WORKSPACE/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
             $GDB_FLAG \
             --with-gcc-dep-libs="$HOST_DEPS" \
-            --with-stage1-ldflags="-static-libgcc" \
-            --with-boot-ldflags="-static-libgcc -static-libstdc++" \
             LDFLAGS="-L$HOST_DEPS/lib" \
             CPPFLAGS="-I$HOST_DEPS/include"
 
           [ -f Makefile ] || { echo "ERROR: no Makefile after configure" >&2; exit 1; }
           cp Makefile Makefile.bak
 
-          # NOTE: this perl line is intentionally the version from the working
-          # YAML (single space, matches nothing, i.e. a no-op).  Used here as a
-          # bisection test to see whether the "\s* + ldflags" variant from the
-          # previous attempt is what broke the build.
-          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
-          echo "--- CONFIGURE_GCC_DEP_LIBS after perl ---"
+          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=.*)$|$1 --disable-nls --without-zstd|' Makefile
+
+          echo "--- patched CONFIGURE_GCC_DEP_LIBS ---"
           grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
+
+          grep -q '^CONFIGURE_GCC_DEP_LIBS.*--disable-nls' Makefile \
+            || { echo "ERROR: CONFIGURE_GCC_DEP_LIBS patch did not take"; \
+                 grep -n 'CONFIGURE_GCC_DEP_LIBS' Makefile.bak; exit 1; }
 
       - name: Build
         working-directory: xuantie-gnu-toolchain
         run: |
           JOBS="$( (sysctl -n hw.ncpu 2>/dev/null) || nproc )"
           make \
-            BINUTILS_TARGET_FLAGS_EXTRA="--without-zstd" \
-            BINUTILS_NATIVE_FLAGS_EXTRA="--without-zstd" \
-            GDB_TARGET_FLAGS_EXTRA="--without-zstd" \
-            GDB_NATIVE_FLAGS_EXTRA="--without-zstd" \
+            BINUTILS_TARGET_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
+            BINUTILS_NATIVE_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
+            GDB_TARGET_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
+            GDB_NATIVE_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
             -j"$JOBS"
 
       - name: Verify
@@ -295,6 +352,15 @@ jobs:
                  | grep -E "^\s+/opt/homebrew|^\s+/usr/local"; then
               echo "ERROR: Homebrew paths still present"; exit 1
             fi
+
+            ARCH_OK=1
+            for BIN in \
+              "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-gcc" \
+              "$GITHUB_WORKSPACE/$INSTALL_DIR/bin/riscv64-unknown-elf-ld" ; do
+              [ -f "$BIN" ] || continue
+              file "$BIN" | grep -qE "Mach-O 64-bit executable (arm64|x86_64)" || ARCH_OK=0
+            done
+            [ "$ARCH_OK" = "1" ] || { echo "ERROR: unexpected arch"; exit 1; }
           else
             if find "$GITHUB_WORKSPACE/$INSTALL_DIR" -type f -perm -u+x -print0 \
                  | xargs -0 -n1 -P4 sh -c '
@@ -364,6 +430,47 @@ jobs:
           git submodule update --init binutils gcc newlib
           [ "$ENABLE_GDB" = "true" ] && git submodule update --init gdb || true
 
+      - name: Patch readline for C23 (MSYS2)
+        shell: msys2 {0}
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          SIGNALS=""
+          for CAND in gdb/readline/readline/signals.c \
+                      readline/readline/signals.c ; do
+            [ -f "$CAND" ] && SIGNALS="$CAND" && break
+          done
+          if [ -z "$SIGNALS" ]; then
+            echo "readline signals.c not found, skipping C23 patch"
+            exit 0
+          fi
+          echo "Patching $SIGNALS"
+          python - "$SIGNALS" <<'PYEOF'
+          import pathlib, re, sys
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          changed = False
+          new_typedef = "typedef RETSIGTYPE SigHandler (int);"
+          if new_typedef in src:
+              print("SigHandler typedef already patched")
+          else:
+              pat = re.compile(r'typedef\s+RETSIGTYPE\s+SigHandler\s*\(\s*\)\s*;')
+              src, n = pat.subn(new_typedef, src, count=1)
+              if n != 1:
+                  sys.exit("FATAL: SigHandler typedef not found")
+              changed = True
+              print("Patched SigHandler typedef for C23")
+          pat = re.compile(r'(#\s*define\s+SIGHANDLER_RETURN\s+)return\s*\(0\)')
+          src, n = pat.subn(r'\1return', src, count=1)
+          if n:
+              changed = True
+              print("Patched SIGHANDLER_RETURN for C23")
+          else:
+              print("SIGHANDLER_RETURN already correct")
+          if changed:
+              p.write_text(src)
+          PYEOF
+          git diff -- "$SIGNALS" || true
+
       - name: Patch newlib pthread (MSYS2)
         shell: msys2 {0}
         working-directory: xuantie-gnu-toolchain
@@ -386,13 +493,12 @@ jobs:
             --prefix="$(cygpath -u "$GITHUB_WORKSPACE")/$INSTALL_DIR" \
             --with-cmodel=medany \
             --enable-multilib \
-            $GDB_FLAG \
-            --with-stage1-ldflags="-static-libgcc" \
-            --with-boot-ldflags="-static-libgcc -static-libstdc++"
+            $GDB_FLAG
 
           [ -f Makefile ] || { echo "ERROR: no Makefile"; exit 1; }
           cp Makefile Makefile.bak
-          perl -pi -e 's|^CONFIGURE_GCC_DEP_LIBS = |CONFIGURE_GCC_DEP_LIBS = --without-zstd |' Makefile
+
+          perl -pi -e 's|^(CONFIGURE_GCC_DEP_LIBS\s*=.*)$|$1 --disable-nls --without-zstd|' Makefile
           grep -n '^CONFIGURE_GCC_DEP_LIBS' Makefile || true
 
       - name: Build (MSYS2)
@@ -402,10 +508,10 @@ jobs:
           MSYSTEM: MINGW64
         run: |
           make \
-            BINUTILS_TARGET_FLAGS_EXTRA="--without-zstd" \
-            BINUTILS_NATIVE_FLAGS_EXTRA="--without-zstd" \
-            GDB_TARGET_FLAGS_EXTRA="--without-zstd" \
-            GDB_NATIVE_FLAGS_EXTRA="--without-zstd" \
+            BINUTILS_TARGET_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
+            BINUTILS_NATIVE_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
+            GDB_TARGET_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
+            GDB_NATIVE_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
             -j"$(nproc)"
 
       - name: Package (MSYS2)
