@@ -568,11 +568,11 @@ jobs:
         working-directory: xuantie-gnu-toolchain
         env:
           MSYSTEM: MINGW64
+          CC: x86_64-w64-mingw32-gcc
+          CXX: x86_64-w64-mingw32-g++
           CFLAGS: -std=gnu17
           CXXFLAGS: -std=gnu++17
         run: |
-          GDB_FLAG="--enable-gdb"; [ "$ENABLE_GDB" = "true" ] || GDB_FLAG="--disable-gdb"
-
           ./configure \
             --host=x86_64-w64-mingw32 \
             --prefix="$(cygpath -u "$GITHUB_WORKSPACE")/$INSTALL_DIR" \
