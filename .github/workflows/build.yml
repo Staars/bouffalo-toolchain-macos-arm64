@@ -14,7 +14,7 @@ env:
   XUANTIE_REF: V3.0.1
   XUANTIE_BRANCH: xuantie-gnu-toolchain
   INSTALL_DIR: xuantie-gnu-toolchain/install
-  ENABLE_GDB: 'true'
+  ENABLE_GDB: 'false'
 
 jobs:
   build-unix:
