@@ -14,7 +14,7 @@ env:
   XUANTIE_REF: V3.0.1
   XUANTIE_BRANCH: xuantie-gnu-toolchain
   INSTALL_DIR: xuantie-gnu-toolchain/install
-  ENABLE_GDB: 'false'
+  ENABLE_GDB: 'true'
 
 jobs:
   build-unix:
@@ -73,10 +73,6 @@ jobs:
           JOBS="$( (sysctl -n hw.ncpu 2>/dev/null) || nproc )"
           cd "$RUNNER_TEMP"
 
-          # Download helper: retries with backoff, then walks a mirror list.
-          # SourceForge / ftp.gnu.org DNS for these hosts is known to flake
-          # from GitHub runners (we have seen "Could not resolve host:
-          # libisl.sourceforge.io").
           fetch_tarball() {
             local out="$1"; shift
             for url in "$@"; do
@@ -438,6 +434,78 @@ jobs:
           git checkout "$XUANTIE_REF"
           git submodule update --init binutils gcc newlib
           [ "$ENABLE_GDB" = "true" ] && git submodule update --init gdb || true
+
+      - name: Patch libcody for C++20 char8_t (MSYS2)
+        shell: msys2 {0}
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          # MSYS2's mingw-w64 GCC 15 defaults to C++20 (or later), where
+          # u8"..." literals are const char8_t[] instead of const char[],
+          # so the S2C template no longer matches:
+          #   error: no matching function for call to 'S2C(const char8_t [2])'
+          # Unix hosts default to C++17 and don't hit this.
+          # Fix from GCC commit daa3e1e (backport r14-12371):
+          # add a char8_t overload of S2C, and cast bare u8"..." literals
+          # in client.cc/server.cc to (const char *).
+          CODY="gcc/libcody/cody.hh"
+          if [ ! -f "$CODY" ]; then
+            echo "ERROR: $CODY not found"; exit 1
+          fi
+          echo "Patching $CODY"
+          python - "$CODY" <<'PYEOF'
+          import pathlib, re, sys
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          if "char8_t const (&s)" in src:
+              print("cody.hh already patched for char8_t"); sys.exit(0)
+          pat = re.compile(
+              r'template<unsigned int I>\s*\n'
+              r'constexpr char S2C \(char const \(&s\)\[I\]\)\s*\n'
+              r'\{[^}]*\}',
+              re.DOTALL)
+          m = pat.search(src)
+          if not m:
+              sys.exit("FATAL: S2C template not found in cody.hh")
+          original = m.group(0)
+          addition = (
+              "\n\n"
+              "#if defined(__cpp_char8_t) && __cpp_char8_t >= 201811\n"
+              "template<unsigned int I>\n"
+              "constexpr char S2C (char8_t const (&s)[I])\n"
+              "{\n"
+              "  return static_cast<char>(s[0]);\n"
+              "}\n"
+              "#endif\n"
+          )
+          src = src.replace(original, original + addition, 1)
+          p.write_text(src)
+          print("Patched cody.hh: added char8_t overload of S2C")
+          PYEOF
+
+          for FILE in gcc/libcody/client.cc gcc/libcody/server.cc; do
+            [ -f "$FILE" ] || { echo "$FILE not found, skipping"; continue; }
+            echo "Patching $FILE"
+            python - "$FILE" <<'PYEOF'
+          import pathlib, re, sys
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          if "(const char *) u8" in src:
+              print(f"{p} already patched"); sys.exit(0)
+          pat = re.compile(r'(?<!\)\s)u8"([^"]*)"')
+          n = 0
+          def repl(m):
+              global n
+              n += 1
+              return f'(const char *) u8"{m.group(1)}"'
+          src = pat.sub(repl, src)
+          if n:
+              p.write_text(src)
+              print(f"Patched {n} u8 literals in {p.name}")
+          else:
+              print(f"No u8 literals found in {p.name}")
+          PYEOF
+          done
+          git diff -- gcc/libcody/cody.hh gcc/libcody/client.cc gcc/libcody/server.cc || true
 
       - name: Patch readline for C23 (MSYS2)
         shell: msys2 {0}
