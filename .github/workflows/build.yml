@@ -304,6 +304,22 @@ jobs:
             git -C newlib diff -- libc/machine/riscv/pthread.c || true
           fi
 
+          if [ -f gcc/gcc/system.h ]; then
+            python3 - gcc/gcc/system.h <<'PYEOF'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          txt = p.read_text()
+          safe_idx = txt.find('#include "safe-ctype.h"')
+          if safe_idx != -1 and "# include <memory>" not in txt[:safe_idx]:
+              target = "# include <cstring>"
+              if target in txt[:safe_idx]:
+                  txt = txt.replace(target, "# include <memory>\n# include <cstring>", 1)
+                  p.write_text(txt)
+                  print("Patched gcc/gcc/system.h: included <memory> before safe-ctype.h")
+          PYEOF
+            git -C gcc diff -- gcc/system.h || true
+          fi
+
       - name: Configure
         working-directory: xuantie-gnu-toolchain
         run: |
@@ -402,7 +418,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes
+            || gh release create "$TAG" --title "$TAG" --generate-notes || true
           gh release upload "$TAG" "$TARBALL" "$TARBALL.sha256" --clobber
 
   build-windows:
@@ -519,6 +535,34 @@ jobs:
           done
           git diff -- gcc/libcody/cody.hh gcc/libcody/client.cc gcc/libcody/server.cc || true
 
+      - name: Patch GCC system.h for safe-ctype (MSYS2)
+        shell: msys2 {0}
+        working-directory: xuantie-gnu-toolchain
+        run: |
+          SYS_H="gcc/gcc/system.h"
+          if [ ! -f "$SYS_H" ]; then
+            echo "ERROR: $SYS_H not found"; exit 1
+          fi
+          echo "Patching $SYS_H"
+          python - "$SYS_H" <<'PYEOF'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          txt = p.read_text()
+          safe_idx = txt.find('#include "safe-ctype.h"')
+          if safe_idx == -1:
+              sys.exit("FATAL: safe-ctype.h not found in system.h")
+          if "# include <memory>" in txt[:safe_idx]:
+              print("system.h already includes <memory> before safe-ctype.h")
+              sys.exit(0)
+          target = "# include <cstring>"
+          if target not in txt[:safe_idx]:
+              sys.exit("FATAL: target '# include <cstring>' not found before safe-ctype.h")
+          txt = txt.replace(target, "# include <memory>\n# include <cstring>", 1)
+          p.write_text(txt)
+          print("Patched system.h: included <memory> before safe-ctype.h")
+          PYEOF
+          git diff -- gcc/gcc/system.h || true
+
       - name: Patch newlib pthread (MSYS2)
         shell: msys2 {0}
         working-directory: xuantie-gnu-toolchain
@@ -583,5 +627,5 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes
+            || gh release create "$TAG" --title "$TAG" --generate-notes || true
           gh release upload "$TAG" "$TARBALL" "$TARBALL.sha256" --clobber
