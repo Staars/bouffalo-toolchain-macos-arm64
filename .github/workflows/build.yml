@@ -597,9 +597,10 @@ jobs:
       - name: Package (MSYS2)
         shell: msys2 {0}
         run: |
+          WS="$(cygpath -u "$GITHUB_WORKSPACE")"
           cd /d/b/install
-          tar -czf "$GITHUB_WORKSPACE/$TARBALL" .
-          sha256sum "$GITHUB_WORKSPACE/$TARBALL" | tee "$GITHUB_WORKSPACE/$TARBALL.sha256"
+          tar -czf "$WS/$TARBALL" .
+          sha256sum "$WS/$TARBALL" | tee "$WS/$TARBALL.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
