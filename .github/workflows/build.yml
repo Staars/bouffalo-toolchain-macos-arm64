@@ -304,22 +304,6 @@ jobs:
             git -C newlib diff -- libc/machine/riscv/pthread.c || true
           fi
 
-          if [ -f gcc/gcc/system.h ]; then
-            python3 - gcc/gcc/system.h <<'PYEOF'
-          import pathlib, sys
-          p = pathlib.Path(sys.argv[1])
-          txt = p.read_text()
-          safe_idx = txt.find('#include "safe-ctype.h"')
-          if safe_idx != -1 and "# include <memory>" not in txt[:safe_idx]:
-              target = "# include <cstring>"
-              if target in txt[:safe_idx]:
-                  txt = txt.replace(target, "# include <memory>\n# include <cstring>", 1)
-                  p.write_text(txt)
-                  print("Patched gcc/gcc/system.h: included <memory> before safe-ctype.h")
-          PYEOF
-            git -C gcc diff -- gcc/system.h || true
-          fi
-
       - name: Configure
         working-directory: xuantie-gnu-toolchain
         run: |
@@ -431,6 +415,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Enable Windows Long Paths
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -446,9 +435,10 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-
-          git clone --branch "$XUANTIE_BRANCH" "$XUANTIE_REPO" xuantie-gnu-toolchain
-          cd xuantie-gnu-toolchain
+          git config --global --add safe.directory '*'
+          rm -rf /d/b
+          git clone --branch "$XUANTIE_BRANCH" "$XUANTIE_REPO" /d/b
+          cd /d/b
           git fetch --tags origin
           git checkout "$XUANTIE_REF"
 
@@ -459,8 +449,8 @@ jobs:
 
       - name: Patch libcody for C++20 char8_t (MSYS2)
         shell: msys2 {0}
-        working-directory: xuantie-gnu-toolchain
         run: |
+          cd /d/b
           CODY="gcc/libcody/cody.hh"
           if [ ! -f "$CODY" ]; then
             echo "ERROR: $CODY not found"; exit 1
@@ -537,8 +527,8 @@ jobs:
 
       - name: Patch GCC system.h for safe-ctype (MSYS2)
         shell: msys2 {0}
-        working-directory: xuantie-gnu-toolchain
         run: |
+          cd /d/b
           SYS_H="gcc/gcc/system.h"
           if [ ! -f "$SYS_H" ]; then
             echo "ERROR: $SYS_H not found"; exit 1
@@ -565,8 +555,8 @@ jobs:
 
       - name: Patch newlib pthread (MSYS2)
         shell: msys2 {0}
-        working-directory: xuantie-gnu-toolchain
         run: |
+          cd /d/b
           if [ -f newlib/libc/machine/riscv/pthread.c ]; then
             sed -i 's|#include "../../libgloss/libnosys/config.h"|#include "config.h"|' \
               newlib/libc/machine/riscv/pthread.c
@@ -574,7 +564,6 @@ jobs:
 
       - name: Configure (MSYS2)
         shell: msys2 {0}
-        working-directory: xuantie-gnu-toolchain
         env:
           MSYSTEM: MINGW64
           CC: x86_64-w64-mingw32-gcc
@@ -583,21 +572,22 @@ jobs:
           CXXFLAGS: -std=gnu++17
         run: |
           set -euo pipefail
+          cd /d/b
 
           ./configure \
             --host=x86_64-w64-mingw32 \
-            --prefix="$(cygpath -u "$GITHUB_WORKSPACE")/$INSTALL_DIR" \
+            --prefix=/d/b/install \
             --with-cmodel=medany \
             --enable-multilib \
             --disable-gdb
             
       - name: Build (MSYS2)
         shell: msys2 {0}
-        working-directory: xuantie-gnu-toolchain
         env:
           MSYSTEM: MINGW64
         run: |
           set -euo pipefail
+          cd /d/b
 
           make \
             BINUTILS_TARGET_FLAGS_EXTRA="--disable-nls --without-zstd --without-lzma" \
@@ -607,7 +597,7 @@ jobs:
       - name: Package (MSYS2)
         shell: msys2 {0}
         run: |
-          cd "$GITHUB_WORKSPACE/$INSTALL_DIR"
+          cd /d/b/install
           tar -czf "$GITHUB_WORKSPACE/$TARBALL" .
           sha256sum "$GITHUB_WORKSPACE/$TARBALL" | tee "$GITHUB_WORKSPACE/$TARBALL.sha256"
 
