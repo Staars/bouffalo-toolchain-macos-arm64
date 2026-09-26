@@ -1,82 +1,74 @@
-# Bouffalo macOS ARM64 Toolchain
+# Bouffalo Toolchain Releases
 
-Native Apple Silicon (arm64) build of the Xuantie GNU Toolchain for Bouffalo Lab chips (BL616, BL808, etc.).
+Pre-built Xuantie GNU Toolchain binaries for Bouffalo Lab chips (BL616, BL808, etc.).
 
-Upstream: <https://github.com/XUANTIE-RV/xuantie-gnu-toolchain> (successor of `T-head-Semi/xuantie-gnu-toolchain`).
-Pinned upstream ref for reproducible builds: **`V3.0.1`** (`c66309b74edd581125a8165f07296c85d3fa71c9`, branch `xuantie-gnu-toolchain`).
-See `.github/workflows/build.yml` (`XUANTIE_REF`) and `LICENSE.note`.
+Upstream: <https://github.com/XUANTIE-RV/xuantie-gnu-toolchain>  
+Pinned ref: **`V3.0.1`**
 
-Why native? Rosetta 2 is on a deprecation path (expected to remain through macOS 26/27). An arm64 toolchain is future-proof.
+> **This repo is for downloading pre-built binaries only.** There is nothing useful to clone here.
 
-## Download
+---
 
-Go to [Releases](../../releases) and download the tarball matching your preference (plus `.sha256`):
+## Available Platforms
 
-- `xuantie-gnu-toolchain-macos-26-arm64.tar.gz` (recommended — built on macOS 26 Tahoe)
-- `xuantie-gnu-toolchain-macos-15-arm64.tar.gz` (built on macOS 15 Sequoia)
+| Platform | File |
+|---|---|
+| macOS 26 (Tahoe) · Apple Silicon | `xuantie-gnu-toolchain-macos-26-arm64.tar.gz` |
+| Linux x86_64 (Ubuntu 22.04) | `xuantie-gnu-toolchain-linux-x86_64.tar.gz` |
+| Linux ARM64 (Ubuntu 24.04) | `xuantie-gnu-toolchain-linux-arm64.tar.gz` |
+| Windows x86_64 | `xuantie-gnu-toolchain-windows-x86_64.tar.gz` |
 
-Both are native Apple Silicon binaries; either works on arm64 Macs. Verify and install, e.g.:
+---
 
+## Download & Verify
+
+Go to [Releases](../../releases) and grab the tarball for your platform plus its `.sha256` file.
+
+**macOS / Linux:**
 ```bash
 shasum -a 256 -c xuantie-gnu-toolchain-macos-26-arm64.tar.gz.sha256
 ```
 
+**Windows (PowerShell):**
+```powershell
+Get-FileHash xuantie-gnu-toolchain-windows-x86_64.tar.gz -Algorithm SHA256
+```
+
+---
+
 ## Install
 
+### macOS / Linux
+
 ```bash
-sudo mkdir -p /opt/riscv-toolchain/xuantie
-sudo tar -xzf xuantie-gnu-toolchain-macos-26-arm64.tar.gz -C /opt/riscv-toolchain/xuantie --strip-components=1
-export PATH=/opt/riscv-toolchain/xuantie/bin:$PATH
+sudo mkdir -p /opt/xuantie
+sudo tar -xzf xuantie-gnu-toolchain-macos-26-arm64.tar.gz -C /opt/xuantie
+export PATH=/opt/xuantie/bin:$PATH
 riscv64-unknown-elf-gcc --version
-file $(which riscv64-unknown-elf-gcc)  # should say arm64
 ```
 
-Add to `~/.zshrc`:
+Add to `~/.zshrc` (macOS) or `~/.bashrc` (Linux) to make it permanent:
 
 ```bash
-export PATH=/opt/riscv-toolchain/xuantie/bin:$PATH
+export PATH=/opt/xuantie/bin:$PATH
 ```
+
+### Windows
+
+Extract the `.tar.gz` (e.g. with [7-Zip](https://www.7-zip.org/)) to a folder such as `C:\xuantie`, then add `C:\xuantie\bin` to your `PATH`.
+
+---
 
 ## Use with Bouffalo SDK
 
-In your project `Makefile`:
+Set `CROSS_COMPILE` to the toolchain prefix, e.g. in your `Makefile`:
 
 ```makefile
-CROSS_COMPILE ?= /opt/riscv-toolchain/xuantie/bin/riscv64-unknown-elf-
+CROSS_COMPILE ?= /opt/xuantie/bin/riscv64-unknown-elf-
 ```
 
-In `bouffalo_sdk/cmake/bflb_flash.cmake`, set:
-
-```cmake
-set(BL_FW_POST_PROC ${BL_SDK_BASE}/tools/bflb_tools/bflb_fw_post_proc/bflb_fw_post_proc-macos)
-```
-
-> **Note:** `bflb_fw_post_proc-macos` in the SDK is currently x86_64. If it hasn't been updated to arm64, you'll need to build it from source or continue using Rosetta for that one helper until a native build is available.
-
-## Build your own release
-
-This repo builds a matrix of native arm64 runners (`macos-15` + `macos-26`):
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-Wait ~1–2 hours, then check Releases. You can also trigger manually via Actions → `workflow_dispatch`.
-
-To update the toolchain later, bump `XUANTIE_REF` in `.github/workflows/build.yml` to the new stable tag (check <https://github.com/XUANTIE-RV/xuantie-gnu-toolchain/releases>), commit, and push a new `v*` tag.
-
-GDB is built by default (upstream default). To skip it for a faster build, set `ENABLE_GDB: 'false'` in `.github/workflows/build.yml` (passes `--disable-gdb`).
-
-## Troubleshooting
-
-- `newlib` failure is the usual suspect on macOS. See the commented Pine64 patch line in `build.yml`.
-- The workflow patches binutils' bundled zlib (`fdopen` define poisons modern macOS SDK headers), GDB's `enum-flags.h` (new Clang rejects the `T(-1)` signedness probe), and newlib's riscv `pthread.c` (bogus relative `config.h` include; same root cause as pine_ox64's `riscv-newlib.patch`) — see the `Patch for macOS ARM64` step.
-- GDB's configure needs `--with-gcc-dep-libs="$(brew --prefix)"` because Apple Clang doesn't search Homebrew's prefix by default (fails with `Building GDB requires GMP 4.2+` otherwise).
-- The workflow intentionally inits only the `binutils`/`gcc`/`newlib` submodules (`+gdb` when enabled). A full `--recursive` checkout is broken at `V3.0.1` (stale `dejagnu` ref upstream) and pulls unneeded `llvm`/`qemu`/`glibc` (~6.65 GB full clone).
-- `M linux-headers/...netfilter/...` case-collision warnings on macOS runners are harmless for newlib builds (case-insensitive APFS; those headers are linux-only).
-- `macos-14` is intentionally not used: GitHub deprecated the Sonoma images (fully unsupported after 2026-11-02).
+---
 
 ## Licensing
 
-See `LICENSE.note`. The toolchain is GPL-licensed; redistributed binaries must comply (source offer / link to pinned upstream commit).
+The toolchain is GPL-licensed. See `LICENSE.note` for details and the link to the pinned upstream source.
